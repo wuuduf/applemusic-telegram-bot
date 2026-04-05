@@ -1,0 +1,10 @@
+.git
+.github
+*.log
+telegram-cache.json
+config.yaml
+downloads/
+AM-DL downloads/
+AM-DL-Atmos downloads/
+AM-DL-AAC downloads/
+

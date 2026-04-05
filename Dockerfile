@@ -23,8 +23,7 @@ RUN apt-get update && \
 COPY --from=builder /bin/apple-music-dl /usr/local/bin/apple-music-dl
 
 WORKDIR /app
-COPY config.yaml ./
-
+COPY config.example.yaml ./config.yaml
 RUN echo 'alac-save-folder: "/downloads/ALAC"' >> config.yaml \
     && echo 'atmos-save-folder: "/downloads/Atmos"' >> config.yaml \
     && echo 'aac-save-folder: "/downloads/AAC"' >> config.yaml

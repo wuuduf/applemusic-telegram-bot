@@ -22,7 +22,7 @@ type CDM struct {
 	clientID   []byte
 	sessionID  [32]byte
 
-	widevineCencHeader      WidevineCencHeader
+	widevineCencHeader      *WidevineCencHeader
 	signedDeviceCertificate SignedDeviceCertificate
 	privacyMode             bool
 }
@@ -44,11 +44,11 @@ func NewCDM(privateKey string, clientID []byte, initData []byte) (CDM, error) {
 		return CDM{}, err
 	}
 
-	var widevineCencHeader WidevineCencHeader
+	widevineCencHeader := &WidevineCencHeader{}
 	if len(initData) < 32 {
 		return CDM{}, errors.New("initData not long enough")
 	}
-	if err := proto.Unmarshal(initData[32:], &widevineCencHeader); err != nil {
+	if err := proto.Unmarshal(initData[32:], widevineCencHeader); err != nil {
 		return CDM{}, err
 	}
 
@@ -115,7 +115,7 @@ func (c *CDM) GetLicenseRequest() ([]byte, error) {
 		licenseRequest.Type = &v
 	}
 
-	licenseRequest.Msg.ContentId.CencId.Pssh = &c.widevineCencHeader
+	licenseRequest.Msg.ContentId.CencId.Pssh = c.widevineCencHeader
 
 	{
 		v := LicenseType_DEFAULT

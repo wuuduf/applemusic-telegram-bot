@@ -60,7 +60,9 @@ Original script by Sorrow. Modified by me to include some fixes and improvements
 
 You can change `config.yaml` by mounting a volume:
 
-> **Note:** Before running the following command, make sure that a `config.yaml` file exists in your current directory. You can create your own, or copy the default one from the repository (if available). If `./config.yaml` does not exist, Docker will create an empty directory instead of a file, which will cause the container to fail.
+> **Note:** Before running the following command, create a local config first:
+> `cp config.example.yaml config.yaml`
+> If `./config.yaml` does not exist, Docker will create an empty directory instead of a file, which will cause the container to fail.
 ```bash
 docker run --network host -v ./downloads:/downloads -v ./config.yaml:/app/config.yaml ghcr.io/zhaarey/apple-music-downloader [args]
 ```
@@ -96,25 +98,47 @@ docker run --rm -it \
 Notes:
 - Mount `telegram-cache.json` only if you enable `telegram-cache-file`.
 - The bot uses long polling; no port mapping is required.
+- Never commit real values in `config.yaml`. Keep tracked defaults in `config.example.yaml`.
 
 ## Telegram bot mode
-1. Set `telegram-bot-token` in `config.yaml` (or export `TELEGRAM_BOT_TOKEN`).
+1. Copy `config.example.yaml` to `config.yaml`, then set `telegram-bot-token` (or export `TELEGRAM_BOT_TOKEN`).
 2. Optional: set `telegram-allowed-chat-ids` to restrict usage.
-3. Optional: set `telegram-api-url` to override the Telegram API base URL.
+3. Optional: set `telegram-api-url` to override the Telegram API base URL (`https://` is recommended; `http://` will print a security warning).
 4. Start the bot: `go run main.go --bot`
 5. Commands:
    - `/search_song <keywords>`
    - `/search_album <keywords>`
    - `/search_artist <keywords>`
-   - `/id <song|album> <id>`
-   - `/settings [alac|flac]`
+   - `/search <type> <keywords>` (`type`: `song|album|artist`)
+   - `/songid <id>`
+   - `/albumid <id>`
+   - `/playlistid <id>`
+   - `/stationid <id>`
+   - `/mvid <id>`
+   - `/artistid <id>` (choose Albums or Music Videos)
+   - `/id <song|album|playlist|station|mv|artist> <id>`
+   - `/url <apple-music-url>`
+   - `/settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3]`
+
+6. You can also send Apple Music URLs directly in chat. The bot auto-detects:
+   - `song`
+   - `album`
+   - `playlist`
+   - `artist`
+   - `station`
+   - `music-video`
 
 Notes:
-- The bot sends ALAC by default. Use `/settings flac` for FLAC output (requires `ffmpeg`).
+- Default format is ALAC. `/settings` now supports ALAC/FLAC/AAC/Atmos plus AAC profile and MV audio profile.
+- Artist flow supports a second step: choose `Albums` or `Music Videos`.
+- Album/Playlist/Station transfer mode is unified: `one by one` or `ZIP`.
+- ZIP results are cached via Telegram `file_id` for album/playlist/station.
+- MV supports send-as-video, fallback-to-document, and Telegram `file_id` cache re-send.
+- If ZIP is too large for Telegram, the bot falls back to one-by-one transfer automatically.
 - If the download folder exceeds the limit, older files are removed (default 3GB; set `telegram-download-max-gb`, Telegram cache remains).
 - Large files are re-encoded to fit `telegram-max-file-mb` in FLAC mode (quality may be reduced).
 - For localized search results, set `telegram-search-language` (e.g. `zh-Hans`) or the global `language`.
-- To enable instant re-sends, set `telegram-cache-file` so the bot can reuse Telegram file IDs.
+- To enable instant re-sends, set `telegram-cache-file` so the bot can reuse Telegram file IDs (song audio + MV + ZIP).
 - Share buttons require enabling inline mode in BotFather.
 
 ## Downloading lyrics

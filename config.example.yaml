@@ -1,6 +1,6 @@
 media-user-token: "your-media-user-token" # If you need lyrics/aac-lc/station/MV, set this
 authorization-token: "your-authorization-token" #You don't need to change it; it can automatically obtain token
-language: ""         #supportedLanguage by each storefront --> https://gist.github.com/itouakirai/c8ba9df9dc65bd300094103b058731d0
+language: "zh-Hans-CN"         #supportedLanguage by each storefront --> https://gist.github.com/itouakirai/c8ba9df9dc65bd300094103b058731d0
 lrc-type: "lyrics"   #lyrics or syllable-lyrics
 lrc-format: "lrc"   #lrc or ttml
 embed-lrc: true
@@ -49,7 +49,7 @@ mv-max: 2160
 # storefront is the 2-letter country code that are available in the urls (jp, ca, us etc.).
 # if your account is from Japan, you must use jp.
 # if the storefront is different from your account, you will see a "failed to get lyrics" error in most of the songs. By default the storefront is set to US if not set.
-storefront: "your account storefront"
+storefront: "us"
 # Conversion settings
 convert-after-download: false     # Enable post-download conversion (requires ffmpeg)
 convert-format: "flac"            # flac | mp3 | opus | wav | copy (no re-encode)
@@ -65,8 +65,8 @@ telegram-bot-token: ""            # Bot token or set TELEGRAM_BOT_TOKEN
 telegram-api-url: ""              # Optional API base URL override (default: https://api.telegram.org). Avoid plain HTTP unless you trust the network.
 telegram-allowed-chat-ids: []     # Optional chat ID allowlist
 telegram-search-limit: 8          # Results per search
-telegram-search-language: ""      # Optional search language override (e.g. zh-Hans, zh-Hant)
+telegram-search-language: "zh-Hans"      # Optional search language override (e.g. zh-Hans, zh-Hant)
 telegram-max-file-mb: 50          # Max file size to send
 telegram-download-folder: ""      # Optional override for downloads
-telegram-cache-file: ""           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP) 
+telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP)
 telegram-download-max-gb: 3        # Cleanup threshold for Telegram download folder

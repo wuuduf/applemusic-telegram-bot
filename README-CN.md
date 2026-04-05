@@ -56,25 +56,47 @@ docker run --rm -it \
 注意：
 - 只有启用 `telegram-cache-file` 时才需要挂载 `telegram-cache.json`。
 - 机器人使用长轮询，不需要映射端口。
+- 不要提交包含真实密钥的 `config.yaml`；仓库默认模板应保持在 `config.example.yaml`。
 
 ## Telegram 机器人模式
-1. 在 `config.yaml` 设置 `telegram-bot-token`（或导出 `TELEGRAM_BOT_TOKEN`）。
+1. 先执行 `cp config.example.yaml config.yaml`，再在 `config.yaml` 设置 `telegram-bot-token`（或导出 `TELEGRAM_BOT_TOKEN`）。
 2. 可选：设置 `telegram-allowed-chat-ids` 限制使用者。
-3. 可选：设置 `telegram-api-url` 修改 Telegram API 地址。
+3. 可选：设置 `telegram-api-url` 修改 Telegram API 地址（建议 `https://`；使用 `http://` 会输出安全警告）。
 4. 启动：`go run main.go --bot`
 5. 命令示例：
    - `/search_song <关键词>`
    - `/search_album <关键词>`
    - `/search_artist <关键词>`
-   - `/id <song|album> <id>`
-   - `/settings [alac|flac]`
+   - `/search <type> <关键词>`（`type`: `song|album|artist`）
+   - `/songid <id>`
+   - `/albumid <id>`
+   - `/playlistid <id>`
+   - `/stationid <id>`
+   - `/mvid <id>`
+   - `/artistid <id>`（二级选择 Albums 或 Music Videos）
+   - `/id <song|album|playlist|station|mv|artist> <id>`
+   - `/url <apple-music-url>`
+   - `/settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3]`
+
+6. 也支持直接发送 Apple Music 链接，机器人会自动识别：
+   - `song`
+   - `album`
+   - `playlist`
+   - `artist`
+   - `station`
+   - `music-video`
 
 注意：
-- 默认发送 ALAC，如需 FLAC 请使用 `/settings flac`（需要系统有 `ffmpeg`）。
+- 默认格式是 ALAC。`/settings` 已支持 ALAC/FLAC/AAC/Atmos，并可设置 AAC Profile 与 MV 音轨类型。
+- 艺人流程已支持二级选择：`Albums` 或 `Music Videos`。
+- Album/Playlist/Station 统一支持 `逐个发送` 与 `ZIP` 两种传输方式。
+- album/playlist/station 的 ZIP 会缓存 Telegram `file_id`，重复请求可秒传。
+- MV 支持优先 `video` 发送、失败回退 `document`，并支持 Telegram `file_id` 缓存复用。
+- ZIP 超过 Telegram 限制时会自动回退为逐个发送。
 - 下载目录超过限制会自动清理旧文件（默认 3GB，可设置 `telegram-download-max-gb`，不影响 Telegram 缓存）。
 - 超过限制的文件会在 FLAC 模式下重新压缩到 `telegram-max-file-mb`（音质可能下降）。
 - 如需中文搜索结果，可设置 `telegram-search-language`（例如 `zh-Hans`）或全局 `language`。
-- 如需“秒传”复用 Telegram 缓存，可设置 `telegram-cache-file` 保存 file_id 缓存。
+- 如需“秒传”复用 Telegram 缓存，可设置 `telegram-cache-file`（缓存 song audio + MV + ZIP 的 file_id）。
 - 分享按钮需要在 BotFather 中开启 inline 模式。
 
 ## 下载歌词

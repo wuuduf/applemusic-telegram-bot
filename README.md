@@ -102,7 +102,77 @@ go run . --search song "Taylor Swift"
 
 完整示例见：[`config.example.yaml`](./config.example.yaml)
 
-## Docker
+## Docker Compose 部署（推荐，从 git clone 开始）
+
+### 1) 克隆项目
+
+```bash
+git clone https://github.com/wuuduf/applemusic-telegram-bot.git
+cd applemusic-telegram-bot
+```
+
+### 2) 准备配置文件
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+至少修改：
+
+- `telegram-bot-token`（或用容器环境变量 `TELEGRAM_BOT_TOKEN`）
+- `media-user-token`（歌词/AAC-LC/Station/MV 需要）
+
+并把容器网络下的联动地址改成（很关键）：
+
+```yaml
+decrypt-m3u8-port: "wrapper:10020"
+get-m3u8-port: "wrapper:20020"
+telegram-api-url: "http://telegram-bot-api:8081"
+```
+
+### 3) 按注释修改 `docker-compose.yml`
+
+仓库根目录已提供四个服务（其中 `wrapper-init` 只在初始化时临时运行）：
+
+- `wrapper-init`（一次性初始化/登录）
+- `wrapper`（常驻）
+- `telegram-bot-api`（本地 Bot API）
+- `bot`（本项目）
+
+请按文件内注释修改这些值：
+
+- `wrapper-init` / `wrapper` 的 `image` 和 `platform`（按 `uname -m` 架构）
+- `wrapper-init.environment.args`（你的 Apple ID 登录参数）
+- `telegram-bot-api.environment.TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+- `bot.environment.TELEGRAM_BOT_TOKEN`（可留空，改在 `config.yaml`）
+
+### 4) 初始化宿主机目录与文件
+
+```bash
+mkdir -p rootfs/data data/telegram-bot-api downloads
+touch telegram-cache.json
+```
+
+### 5) 执行一次 wrapper 初始化登录（按需）
+
+```bash
+docker compose --profile init run --rm wrapper-init
+```
+
+### 6) 启动全部服务
+
+```bash
+docker compose up -d --build
+```
+
+### 7) 查看运行状态
+
+```bash
+docker compose ps
+docker compose logs -f bot
+```
+
+## Docker（单容器模式，可选）
 
 ```bash
 docker build -t applemusic-telegram-bot .
@@ -117,15 +187,6 @@ docker run --rm -it \
 ```
 
 > 如果 `wrapper` 不在容器内，请确保 `decrypt-m3u8-port` / `get-m3u8-port` 对容器可达。
-
-## 自建 Telegram Bot API（可选）
-
-已提供：
-
-- `docker-compose.telegram-bot-api.yml`
-- `.env.telegram-bot-api.example`
-
-可在 `config.yaml` 中通过 `telegram-api-url` 指向自建地址。
 
 ## 项目结构
 

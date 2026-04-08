@@ -10,6 +10,7 @@
 !Dockerfile
 !.env.telegram-bot-api.example
 !docker-compose.telegram-bot-api.yml
+!docker-compose.yml
 !agent.js
 !agent-arm64.js
 !go.mod

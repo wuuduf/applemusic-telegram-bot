@@ -1,0 +1,98 @@
+services:
+  # ========== wrapper: 一次性初始化（登录）==========
+  # 用法：
+  #   docker compose --profile init run --rm wrapper-init
+  #
+  # 先判断你机器架构：
+  #   uname -m
+  #
+  # 常见对应：
+  #   aarch64 / arm64  -> image: jelly714love/wrapper:arm64   platform: linux/arm64
+  #   x86_64 / amd64   -> image: jelly714love/wrapper:amd64   platform: linux/amd64
+  #
+  # ARM 机器强行跑 x86 镜像也可：
+  #   image: jelly714love/wrapper:amd64
+  #   platform: linux/amd64
+  wrapper-init:
+    # 按你的机器架构修改 image / platform
+    image: jelly714love/wrapper:arm64
+    platform: linux/arm64
+    profiles: ["init"]
+    restart: "no"
+    environment:
+      # 改成你自己的 Apple 账号登录参数（只在初始化时使用）
+      # 例：-L your_apple_id:your_password -F
+      args: "-L <你的AppleID>:<你的密码> -F"
+    volumes:
+      - "./rootfs/data:/app/rootfs/data"
+
+  # ========== wrapper: 常驻服务 ==========
+  wrapper:
+    # 按你的机器架构修改 image / platform
+    image: jelly714love/wrapper:arm64
+    platform: linux/arm64
+    container_name: wrapper
+    restart: unless-stopped
+    environment:
+      # 常驻启动参数，通常不需要改
+      args: "-H 0.0.0.0 -M 20020"
+    ports:
+      - "10020:10020"
+      - "20020:20020"
+      - "30020:30020"
+    volumes:
+      - "./rootfs/data:/app/rootfs/data"
+
+  # ========== Telegram Bot API 本地服务 ==========
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      # 下面两个值请改成你自己的
+      TELEGRAM_API_ID: "2040"
+      TELEGRAM_API_HASH: "b18441a1ff607e10a989891a5462e627"
+
+      # 一般不用改
+      TELEGRAM_HTTP_PORT: "8081"
+      TELEGRAM_LOCAL: "true"
+      TELEGRAM_VERBOSITY: "2"
+    volumes:
+      - "./data/telegram-bot-api:/var/lib/telegram-bot-api"
+
+  # ========== 本项目 Bot ==========
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: applemusic-telegram-bot
+    restart: unless-stopped
+    depends_on:
+      - wrapper
+      - telegram-bot-api
+    command: ["--bot"]
+    environment:
+      # 推荐把 token 写在 config.yaml 的 telegram-bot-token。
+      # 如果你不想写到 config.yaml，也可以填这里。
+      TELEGRAM_BOT_TOKEN: ""
+      TZ: "Asia/Shanghai"
+    volumes:
+      # 你的主配置（必须存在）
+      - "./config.yaml:/app/config.yaml:ro"
+      # 下载目录
+      - "./downloads:/downloads"
+      # Telegram file_id 缓存
+      - "./telegram-cache.json:/app/telegram-cache.json"
+
+# ================== 关键协调关系（必须改 config.yaml）==================
+# 因为 bot 运行在容器内，不能再用 127.0.0.1 指向 wrapper / telegram-bot-api。
+# 请把 /app/config.yaml（即宿主机 ./config.yaml）中的以下项改为：
+#
+# decrypt-m3u8-port: "wrapper:10020"
+# get-m3u8-port: "wrapper:20020"
+# telegram-api-url: "http://telegram-bot-api:8081"
+#
+# 启动：
+#   docker compose up -d --build

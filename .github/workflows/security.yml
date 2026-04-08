@@ -1,0 +1,27 @@
+name: Security Checks
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  secret-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Verify safe defaults in tracked config
+      run: |
+        set -euo pipefail
+        rg -q '^media-user-token:\s*"your-media-user-token"' config.example.yaml
+        rg -q '^telegram-bot-token:\s*""' config.example.yaml
+
+    - name: Scan for Telegram bot token patterns
+      run: |
+        set -euo pipefail
+        if rg -n -P '\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b' --glob '!go.sum' --glob '!CHANGELOG.md' . ; then
+          echo "Potential Telegram bot token detected in repository content."
+          exit 1
+        fi

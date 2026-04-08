@@ -1,0 +1,110 @@
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.1'
+    - name: Test
+      run: |
+        go test -count=1 ./...
+
+  build-windows:
+    runs-on: windows-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.1'
+    - name: Build
+      run: |
+        go build -o main.exe -v .
+    - name: Create a new directory and copy files
+      run: |
+        mkdir -p alac
+        cp agent.js alac/
+        cp agent-arm64.js alac/
+        cp config.example.yaml alac/config.yaml
+        cp README.md alac/
+        cp main.exe alac/
+    - name: Upload apple-music-alac-atmos-downloader
+      uses: actions/upload-artifact@v4
+      with:
+        name: apple-music-alac-atmos-downloader-windows
+        path: alac/*
+
+  build-linux:
+    runs-on: ubuntu-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.1'
+    - name: Build
+      run: |
+        go build -o main -v .
+    - name: Create a new directory and copy files
+      run: |
+        mkdir -p alac
+        cp agent.js alac/
+        cp agent-arm64.js alac/
+        cp config.example.yaml alac/config.yaml
+        cp README.md alac/
+        cp main alac/
+    - name: Upload apple-music-alac-atmos-downloader
+      uses: actions/upload-artifact@v4
+      with:
+        name: apple-music-alac-atmos-downloader-linux
+        path: alac/*
+
+  build-macos:
+    runs-on: macos-latest
+    needs: test
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.1'
+    - name: Build
+      run: |
+        go build -o main -v .
+    - name: Create a new directory and copy files
+      run: |
+        mkdir -p alac
+        cp agent.js alac/
+        cp agent-arm64.js alac/
+        cp config.example.yaml alac/config.yaml
+        cp README.md alac/
+        cp main alac/
+    - name: Upload apple-music-alac-atmos-downloader
+      uses: actions/upload-artifact@v4
+      with:
+        name: apple-music-alac-atmos-downloader-macos
+        path: alac/*

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	sharedcatalog "github.com/wuuduf/applemusic-telegram-bot/internal/catalog"
@@ -32,6 +33,22 @@ func fetchArtistRelationship(storefront, artistID, token, relationship, itemType
 			Artist:        item.ArtistName,
 			Album:         item.AlbumName,
 		})
+	}
+	if relationship == "songs" {
+		seen := make(map[string]struct{}, len(items))
+		filtered := make([]SearchResultItem, 0, len(items))
+		for _, item := range items {
+			id := strings.TrimSpace(item.ID)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			filtered = append(filtered, item)
+		}
+		items = filtered
 	}
 	sort.Slice(items, func(i, j int) bool {
 		di, err1 := time.Parse("2006-01-02", items[i].Detail)
@@ -64,4 +81,8 @@ func FetchArtistAlbums(storefront, artistID, token string, limit int, pageOffset
 
 func FetchArtistMusicVideos(storefront, artistID, token string, limit int, pageOffset int, language string) ([]SearchResultItem, bool, error) {
 	return fetchArtistRelationship(storefront, artistID, token, "music-videos", "Music Video", limit, pageOffset, language)
+}
+
+func FetchArtistSongs(storefront, artistID, token string, limit int, pageOffset int, language string) ([]SearchResultItem, bool, error) {
+	return fetchArtistRelationship(storefront, artistID, token, "songs", "Song", limit, pageOffset, language)
 }

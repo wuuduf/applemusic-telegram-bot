@@ -551,6 +551,10 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 		return func(session *DownloadSession) error {
 			return ripStation(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
 		}, nil
+	case mediaTypeArtistSongs:
+		return func(session *DownloadSession) error {
+			return b.downloadArtistSongsCollection(session, mediaID, storefront)
+		}, nil
 	case mediaTypeMusicVideo:
 		saveDir := strings.TrimSpace(Config.AlacSaveFolder)
 		if saveDir == "" {

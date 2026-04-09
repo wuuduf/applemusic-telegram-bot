@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sharedcatalog "github.com/wuuduf/applemusic-telegram-bot/internal/catalog"
 	apputils "github.com/wuuduf/applemusic-telegram-bot/utils"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
@@ -78,6 +79,7 @@ func TestTelegramMediaProducesSongAudio(t *testing.T) {
 		{mediaType: mediaTypeAlbum, want: true},
 		{mediaType: mediaTypePlaylist, want: true},
 		{mediaType: mediaTypeStation, want: true},
+		{mediaType: mediaTypeArtistSongs, want: true},
 		{mediaType: mediaTypeMusicVideo, want: false},
 		{mediaType: mediaTypeArtist, want: false},
 		{mediaType: mediaTypeAlbumLyrics, want: false},
@@ -102,6 +104,7 @@ func TestShouldUseTelegramCollectionSequentialOneByOne(t *testing.T) {
 		{name: "album one-by-one", single: false, transferMode: transferModeOneByOne, mediaType: mediaTypeAlbum, want: true},
 		{name: "playlist one-by-one", single: false, transferMode: transferModeOneByOne, mediaType: mediaTypePlaylist, want: true},
 		{name: "station one-by-one", single: false, transferMode: transferModeOneByOne, mediaType: mediaTypeStation, want: true},
+		{name: "artist songs one-by-one", single: false, transferMode: transferModeOneByOne, mediaType: mediaTypeArtistSongs, want: true},
 		{name: "zip should not use sequential", single: false, transferMode: transferModeZip, mediaType: mediaTypeAlbum, want: false},
 		{name: "single song should not use collection sequential", single: true, transferMode: transferModeOneByOne, mediaType: mediaTypeSong, want: false},
 		{name: "mv should not use collection sequential", single: false, transferMode: transferModeOneByOne, mediaType: mediaTypeMusicVideo, want: false},
@@ -313,6 +316,64 @@ func TestPendingArtistModeIsolatedByMessageID(t *testing.T) {
 	}
 	if _, ok := b.getPendingArtistMode(chatID, 302); !ok {
 		t.Fatalf("message 302 artist mode should remain")
+	}
+}
+
+func TestCollectUniqueArtistSongIDs(t *testing.T) {
+	items := []sharedcatalog.ArtistRelationshipItem{
+		{ID: "song-1", Name: "Song 1"},
+		{ID: "song-2", Name: "Song 2"},
+		{ID: "song-1", Name: "Song 1 duplicate"},
+		{ID: ""},
+		{ID: "song-3", Name: "Song 3"},
+	}
+	got := collectUniqueArtistSongIDs(items)
+	want := []string{"song-1", "song-2", "song-3"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected unique id count: got=%d want=%d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected unique id order: got=%v want=%v", got, want)
+		}
+	}
+}
+
+func TestHandleArtistModeSelectionSongsPromptsTransfer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":901}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	chatID := int64(3002)
+	panelMessageID := 301
+	bot := &TelegramBot{
+		token:              "test-token",
+		apiBase:            server.URL,
+		client:             server.Client(),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		chatSettings:       make(map[int64]ChatDownloadSettings),
+	}
+	bot.setPendingArtistMode(chatID, "artist-123", "Artist Name", "us", 77, panelMessageID)
+
+	bot.handleArtistModeSelection(chatID, panelMessageID, "songs")
+
+	if _, ok := bot.getPendingArtistMode(chatID, panelMessageID); ok {
+		t.Fatalf("artist mode should be cleared after selecting songs")
+	}
+	pendingTransfer, ok := bot.getPendingTransfer(chatID, 901)
+	if !ok {
+		t.Fatalf("expected transfer prompt for artist songs")
+	}
+	if pendingTransfer.MediaType != mediaTypeArtistSongs || pendingTransfer.MediaID != "artist-123" {
+		t.Fatalf("unexpected pending transfer: %+v", pendingTransfer)
 	}
 }
 
@@ -1158,6 +1219,36 @@ func TestBuildTransferKeyboardLocalizedAndCross(t *testing.T) {
 	}
 	if got := en.InlineKeyboard[1][0].Text; got != "❌" {
 		t.Fatalf("expected cross cancel button, got %q", got)
+	}
+}
+
+func TestBuildArtistModeKeyboardIncludesAllSongs(t *testing.T) {
+	zh := buildArtistModeKeyboard(telegramLanguageZh)
+	if got := zh.InlineKeyboard[0][2].Text; got != "全部歌曲" {
+		t.Fatalf("expected zh all songs label, got %q", got)
+	}
+	if got := zh.InlineKeyboard[0][2].CallbackData; got != "artist_rel:songs" {
+		t.Fatalf("expected songs callback, got %q", got)
+	}
+
+	en := buildArtistModeKeyboard(telegramLanguageEn)
+	if got := en.InlineKeyboard[0][2].Text; got != "All Songs" {
+		t.Fatalf("expected en all songs label, got %q", got)
+	}
+}
+
+func TestNormalizeArtistRelationshipIncludesSongs(t *testing.T) {
+	tests := map[string]string{
+		"albums":   "albums",
+		"mv":       "music-videos",
+		"song":     "songs",
+		"allsongs": "songs",
+		"unknown":  "",
+	}
+	for input, want := range tests {
+		if got := normalizeArtistRelationship(input); got != want {
+			t.Fatalf("input=%q got=%q want=%q", input, got, want)
+		}
 	}
 }
 

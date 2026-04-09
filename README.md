@@ -159,6 +159,14 @@ touch telegram-cache.json
 docker compose --profile init run --rm wrapper-init
 ```
 
+运行后请查看该容器日志输出；若提示需要 2FA，请在项目根目录另开一个终端写入验证码文件：
+
+```bash
+echo -n 240020 > rootfs/data/data/com.apple.android.music/files/2fa.txt
+```
+
+将 `240020` 替换为你 Apple 设备上当前显示的 6 位 2FA 验证码。
+
 ### 6) 启动全部服务
 
 ```bash

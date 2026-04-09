@@ -1172,6 +1172,28 @@ func TestAutoDeleteStickyInteractionCancelsTimer(t *testing.T) {
 	}
 }
 
+func TestDownloadStatusFinishFailureSchedulesAutoDelete(t *testing.T) {
+	b := &TelegramBot{
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
+	}
+	status := &DownloadStatus{
+		bot:       b,
+		chatID:    1001,
+		messageID: 42,
+		stopCh:    make(chan struct{}),
+	}
+	status.finishFailure()
+	key := autoDeleteKey(1001, 42)
+	defer b.clearAutoDeleteMessage(1001, 42)
+	b.autoDeleteMu.Lock()
+	_, exists := b.autoDeleteMessages[key]
+	b.autoDeleteMu.Unlock()
+	if !exists {
+		t.Fatalf("expected failure status to schedule auto-delete")
+	}
+}
+
 func TestNormalizeMediaIdentifierRejectsTraversal(t *testing.T) {
 	t.Parallel()
 	if _, err := normalizeMediaIdentifier(mediaTypeMusicVideo, "../12345"); err == nil {

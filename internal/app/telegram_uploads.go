@@ -883,6 +883,9 @@ func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*Download
 	if err != nil {
 		return nil, err
 	}
+	// 进度消息在任务进行中不走自动删除计时。
+	// 成功由调用方显式删除；失败再挂回 2 分钟自动删除。
+	bot.clearAutoDeleteMessage(chatID, messageID)
 	status := &DownloadStatus{
 		bot:       bot,
 		chatID:    chatID,
@@ -905,6 +908,25 @@ func (s *DownloadStatus) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
+}
+
+func (s *DownloadStatus) finishSuccess() {
+	if s == nil || s.bot == nil {
+		return
+	}
+	s.Stop()
+	if err := s.bot.deleteMessage(s.chatID, s.messageID); err != nil {
+		// 删除失败时兜底挂回自动删除，避免长期残留。
+		s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
+	}
+}
+
+func (s *DownloadStatus) finishFailure() {
+	if s == nil || s.bot == nil {
+		return
+	}
+	s.Stop()
+	s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
 }
 
 func (s *DownloadStatus) Update(phase string, done, total int64) {

@@ -3911,7 +3911,13 @@ func (b *TelegramBot) exportArtistAssets(chatID int64, replyToID int, artistID s
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
 		return
 	}
-	defer status.Stop()
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		status.finishFailure()
+	}()
 
 	tmpDir, err := os.MkdirTemp("", "amdl-artist-assets-*")
 	if err != nil {
@@ -4025,8 +4031,9 @@ func (b *TelegramBot) exportArtistAssets(chatID int64, replyToID int, artistID s
 			displayName = artistName + ".artist-assets.zip"
 		}
 		if err := b.sendDocumentFile(chatID, zipPath, displayName, replyToID, status, ""); err == nil {
-			status.Stop()
-			_ = b.deleteMessage(chatID, status.messageID)
+			completed = true
+			status.finishSuccess()
+			return
 		} else if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
 			status.UpdateSync("ZIP exceeds Telegram size limit, fallback to one-by-one.", 0, 0)
 			transferMode = transferModeOneByOne
@@ -4054,8 +4061,8 @@ func (b *TelegramBot) exportArtistAssets(chatID int64, replyToID int, artistID s
 				sentCount++
 			}
 		}
-		status.Stop()
-		_ = b.deleteMessage(chatID, status.messageID)
+		completed = true
+		status.finishSuccess()
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Artist assets done: sent=%d, covers=%d, animated=%d, failed_albums=%d.", sentCount, coverCount, motionCount, failedAlbums), nil, replyToID)
 		return
 	}
@@ -4264,7 +4271,13 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
 		return
 	}
-	defer status.Stop()
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		status.finishFailure()
+	}()
 	status.Update("Loading album metadata", 0, 0)
 	exported, err := b.catalogService().ExportAlbumLyrics("", albumID, storefront, lyricsFormat)
 	if err != nil {
@@ -4302,8 +4315,8 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 			displayName = safeAlbumName + ".lyrics.zip"
 		}
 		if err := b.sendDocumentFile(chatID, zipPath, displayName, replyToID, status, ""); err == nil {
-			status.Stop()
-			_ = b.deleteMessage(chatID, status.messageID)
+			completed = true
+			status.finishSuccess()
 		} else if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
 			status.UpdateSync("ZIP exceeds Telegram size limit, fallback to one-by-one.", 0, 0)
 			transferMode = transferModeOneByOne
@@ -4319,8 +4332,8 @@ func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int,
 				failedCount++
 			}
 		}
-		status.Stop()
-		_ = b.deleteMessage(chatID, status.messageID)
+		completed = true
+		status.finishSuccess()
 	}
 	if failedCount > 0 {
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Lyrics export completed with %d failed tracks.", failedCount), nil, replyToID)
@@ -5679,7 +5692,13 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
 		return
 	}
-	defer status.Stop()
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		status.finishFailure()
+	}()
 
 	progress := func(phase string, done, total int64) {
 		status.Update(phase, done, total)
@@ -5696,8 +5715,8 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 				return
 			}
 			if sentAny {
-				status.Stop()
-				_ = b.deleteMessage(chatID, status.messageID)
+				completed = true
+				status.finishSuccess()
 			}
 			return
 		}
@@ -5772,8 +5791,8 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 				return
 			}
 		} else {
-			status.Stop()
-			_ = b.deleteMessage(chatID, status.messageID)
+			completed = true
+			status.finishSuccess()
 			return
 		}
 	}
@@ -5793,8 +5812,8 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		sentAny = true
 	}
 	if sentAny {
-		status.Stop()
-		_ = b.deleteMessage(chatID, status.messageID)
+		completed = true
+		status.finishSuccess()
 	}
 }
 

@@ -508,7 +508,11 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		b.noteTelegramRateLimit(err)
 		return err
 	}
-	if hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
+	shouldCacheAudio := true
+	if session != nil {
+		shouldCacheAudio = session.Config.EmbedLrc && session.Config.EmbedCover
+	}
+	if shouldCacheAudio && hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
 		b.storeCachedAudio(meta.TrackID, CachedAudio{
 			FileID:         apiResp.Result.Audio.FileID,
 			FileSize:       apiResp.Result.Audio.FileSize,

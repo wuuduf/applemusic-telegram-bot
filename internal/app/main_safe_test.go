@@ -168,6 +168,30 @@ func TestApplyTelegramAudioEmbeddingPolicy(t *testing.T) {
 	}
 }
 
+func TestApplyTelegramAudioEmbeddingPolicyRespectsEmbedSwitches(t *testing.T) {
+	session := newDownloadSession(structs.ConfigSet{})
+	session.StaticCoverDownload = false
+	settings := ChatDownloadSettings{
+		LyricsFormat:   "lrc",
+		EmbedLyrics:    false,
+		EmbedCover:     false,
+		EmbedInited:    true,
+		AutoCover:      true,
+		SettingsInited: true,
+	}
+	applyTelegramAudioEmbeddingPolicy(session, settings, mediaTypeSong)
+	if session.Config.EmbedLrc {
+		t.Fatalf("expected embed lyrics disabled")
+	}
+	if session.Config.EmbedCover {
+		t.Fatalf("expected embed cover disabled")
+	}
+	// 虽然封面不内嵌，但开启了额外封面，仍需要下载静态封面文件。
+	if !session.StaticCoverDownload {
+		t.Fatalf("expected static cover download enabled when auto cover is on")
+	}
+}
+
 func TestParseTelegramRetryAfterFromJSONBody(t *testing.T) {
 	err := errors.New(`telegram sendDocument failed: {"ok":false,"error_code":429,"description":"Too Many Requests: retry after 13","parameters":{"retry_after":13}}`)
 	got, ok := parseTelegramRetryAfter(err)
@@ -611,6 +635,8 @@ printf '%%s\n' "$last" >> "$log"
 		maxFileBytes: 8,
 	}
 	session := newDownloadSession(Config)
+	session.Config.EmbedLrc = true
+	session.Config.EmbedCover = true
 	session.recordDownloadedFile(audioPath, AudioMeta{
 		TrackID:        "track-1",
 		Title:          "Song",
@@ -850,6 +876,8 @@ func TestSendAudioFileUsesActualFormatFromMeta(t *testing.T) {
 		maxFileBytes: 1024,
 	}
 	session := newDownloadSession(Config)
+	session.Config.EmbedLrc = true
+	session.Config.EmbedCover = true
 	session.recordDownloadedFile(audioPath, AudioMeta{
 		TrackID:        "track-1",
 		Title:          "Song",
@@ -1091,6 +1119,19 @@ func TestNormalizeChatSettingsDefaultLanguage(t *testing.T) {
 	normalized := normalizeChatSettings(ChatDownloadSettings{})
 	if normalized.Language != telegramLanguageZh {
 		t.Fatalf("expected default language zh, got %q", normalized.Language)
+	}
+	if !normalized.EmbedLyrics || !normalized.EmbedCover {
+		t.Fatalf("expected default embed toggles on, got lyrics=%t cover=%t", normalized.EmbedLyrics, normalized.EmbedCover)
+	}
+}
+
+func TestNormalizeChatSettingsLegacyKeepsEmbedDefaultOn(t *testing.T) {
+	normalized := normalizeChatSettings(ChatDownloadSettings{
+		SettingsInited: true,
+		// EmbedInited 默认 false，模拟老版本状态文件未包含新字段。
+	})
+	if !normalized.EmbedLyrics || !normalized.EmbedCover {
+		t.Fatalf("expected legacy settings to default embed toggles on")
 	}
 }
 

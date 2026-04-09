@@ -19,11 +19,13 @@ const (
 
 func cacheProfileKey(settings ChatDownloadSettings) string {
 	normalized := normalizeChatSettings(settings)
-	return fmt.Sprintf("%s|aac:%s|mv:%s|lyr:%s|auto:%t-%t-%t",
+	return fmt.Sprintf("%s|aac:%s|mv:%s|lyr:%s|emb:%t-%t|auto:%t-%t-%t",
 		normalized.Format,
 		normalized.AACType,
 		normalized.MVAudioType,
 		normalized.LyricsFormat,
+		normalized.EmbedLyrics,
+		normalized.EmbedCover,
 		normalized.AutoLyrics,
 		normalized.AutoCover,
 		normalized.AutoAnimated,

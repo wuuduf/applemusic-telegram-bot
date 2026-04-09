@@ -1593,6 +1593,9 @@ type ChatDownloadSettings struct {
 	MVAudioType    string
 	LyricsFormat   string
 	Language       string
+	EmbedLyrics    bool
+	EmbedCover     bool
+	EmbedInited    bool
 	SongZip        bool
 	AutoLyrics     bool
 	AutoCover      bool
@@ -1645,14 +1648,15 @@ func applyTelegramAudioEmbeddingPolicy(session *DownloadSession, settings ChatDo
 	if session == nil || !telegramMediaProducesSongAudio(mediaType) {
 		return
 	}
-	// Always embed lyrics + cover for downloaded song audio, regardless of extra-file toggles.
-	session.Config.LrcFormat = settings.LyricsFormat
-	session.Config.SaveLrcFile = settings.AutoLyrics
-	session.Config.EmbedLrc = true
-	session.Config.EmbedCover = true
-	session.Config.SaveAnimatedArtwork = settings.AutoAnimated
-	// Keep static cover download enabled so cover embedding always has a source file.
-	session.StaticCoverDownload = true
+	normalized := normalizeChatSettings(settings)
+	// 歌曲内嵌由聊天设置控制；其他标签写入不受此开关影响。
+	session.Config.LrcFormat = normalized.LyricsFormat
+	session.Config.EmbedLrc = normalized.EmbedLyrics
+	session.Config.EmbedCover = normalized.EmbedCover
+	session.Config.SaveLrcFile = normalized.AutoLyrics
+	session.Config.SaveAnimatedArtwork = normalized.AutoAnimated
+	// 封面文件在「封面内嵌」或「额外封面文件」任一开启时都需要下载。
+	session.StaticCoverDownload = normalized.EmbedCover || normalized.AutoCover
 }
 
 type TelegramBot struct {
@@ -2807,6 +2811,13 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	if language == "" {
 		language = telegramLanguageZh
 	}
+	embedLyrics := settings.EmbedLyrics
+	embedCover := settings.EmbedCover
+	// 新增字段兼容：历史状态未写入 EmbedInited 时，默认都开启。
+	if !settings.EmbedInited {
+		embedLyrics = true
+		embedCover = true
+	}
 	songZip := settings.SongZip
 	autoLyrics := settings.AutoLyrics
 	autoCover := settings.AutoCover
@@ -2823,6 +2834,9 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 		MVAudioType:    mvAudioType,
 		LyricsFormat:   lyricsFormat,
 		Language:       language,
+		EmbedLyrics:    embedLyrics,
+		EmbedCover:     embedCover,
+		EmbedInited:    true,
 		SongZip:        songZip,
 		AutoLyrics:     autoLyrics,
 		AutoCover:      autoCover,
@@ -2907,6 +2921,32 @@ func (b *TelegramBot) setChatLyricsFormat(chatID int64, lyricsFormat string) Cha
 		current.LyricsFormat = normalized
 		return current
 	})
+}
+
+func (b *TelegramBot) setChatEmbedLyrics(chatID int64, enabled bool) ChatDownloadSettings {
+	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
+		current.EmbedLyrics = enabled
+		current.EmbedInited = true
+		return current
+	})
+}
+
+func (b *TelegramBot) setChatEmbedCover(chatID int64, enabled bool) ChatDownloadSettings {
+	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
+		current.EmbedCover = enabled
+		current.EmbedInited = true
+		return current
+	})
+}
+
+func (b *TelegramBot) toggleChatEmbedLyrics(chatID int64) ChatDownloadSettings {
+	settings := b.getChatSettings(chatID)
+	return b.setChatEmbedLyrics(chatID, !settings.EmbedLyrics)
+}
+
+func (b *TelegramBot) toggleChatEmbedCover(chatID int64) ChatDownloadSettings {
+	settings := b.getChatSettings(chatID)
+	return b.setChatEmbedCover(chatID, !settings.EmbedCover)
 }
 
 func (b *TelegramBot) setChatLanguage(chatID int64, language string) ChatDownloadSettings {
@@ -3020,6 +3060,12 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if strings.HasPrefix(data, "setting_lyrics_format:") {
 		lyricsFormat := strings.TrimPrefix(data, "setting_lyrics_format:")
 		settings := b.setChatLyricsFormat(cb.Message.Chat.ID, lyricsFormat)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+	} else if data == "setting_embed:lyrics" {
+		settings := b.toggleChatEmbedLyrics(cb.Message.Chat.ID)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+	} else if data == "setting_embed:cover" {
+		settings := b.toggleChatEmbedCover(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting_lang:") {
 		language := strings.TrimPrefix(data, "setting_lang:")
@@ -3323,12 +3369,32 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				return
 			}
 			switch raw {
-			case "lyrics", "lyrics_on", "lyrics_off":
-				if raw == "lyrics_on" {
+			case "lyrics", "lyrics_on", "lyrics_off", "embed_lyrics", "embed_lyrics_on", "embed_lyrics_off", "lyrics_embed", "lyrics_embed_on", "lyrics_embed_off":
+				if strings.HasSuffix(raw, "_on") {
+					settings = b.setChatEmbedLyrics(chatID, true)
+				} else if strings.HasSuffix(raw, "_off") {
+					settings = b.setChatEmbedLyrics(chatID, false)
+				} else {
+					settings = b.toggleChatEmbedLyrics(chatID)
+				}
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+				return
+			case "cover", "cover_on", "cover_off", "embed_cover", "embed_cover_on", "embed_cover_off", "cover_embed", "cover_embed_on", "cover_embed_off":
+				if strings.HasSuffix(raw, "_on") {
+					settings = b.setChatEmbedCover(chatID, true)
+				} else if strings.HasSuffix(raw, "_off") {
+					settings = b.setChatEmbedCover(chatID, false)
+				} else {
+					settings = b.toggleChatEmbedCover(chatID)
+				}
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+				return
+			case "auto_lyrics", "auto_lyrics_on", "auto_lyrics_off", "extra_lyrics", "extra_lyrics_on", "extra_lyrics_off":
+				if strings.HasSuffix(raw, "_on") {
 					if !settings.AutoLyrics {
 						settings = b.toggleChatAutoLyrics(chatID)
 					}
-				} else if raw == "lyrics_off" {
+				} else if strings.HasSuffix(raw, "_off") {
 					if settings.AutoLyrics {
 						settings = b.toggleChatAutoLyrics(chatID)
 					}
@@ -3337,12 +3403,12 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				}
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
-			case "cover", "cover_on", "cover_off":
-				if raw == "cover_on" {
+			case "auto_cover", "auto_cover_on", "auto_cover_off", "extra_cover", "extra_cover_on", "extra_cover_off":
+				if strings.HasSuffix(raw, "_on") {
 					if !settings.AutoCover {
 						settings = b.toggleChatAutoCover(chatID)
 					}
-				} else if raw == "cover_off" {
+				} else if strings.HasSuffix(raw, "_off") {
 					if settings.AutoCover {
 						settings = b.toggleChatAutoCover(chatID)
 					}
@@ -3382,7 +3448,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
-			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|zh|en|lyrics|cover|animated|songzip|worker1..worker4]", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|zh|en|lyrics|cover|auto_lyrics|auto_cover|animated|songzip|worker1..worker4]", nil, replyToID)
 			return
 		}
 		settings := b.getChatSettings(chatID)
@@ -4919,7 +4985,7 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 	if !forceRefresh && transferMode == transferModeZip && b.trySendCachedBundleZip(chatID, mediaTypeSong, songID, replyToID, settings) {
 		return
 	}
-	if !forceRefresh && transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings.Format) {
+	if !forceRefresh && transferMode == transferModeOneByOne && b.trySendCachedTrack(chatID, replyToID, songID, settings) {
 		b.sendCachedSongAutoExtras(chatID, replyToID, songID, storefront, settings)
 		return
 	}
@@ -5378,8 +5444,13 @@ func (b *TelegramBot) runQueuedRequest(req *downloadRequest) {
 	}
 }
 
-func (b *TelegramBot) trySendCachedTrack(chatID int64, replyToID int, trackID string, format string) bool {
-	entry, ok := b.getCachedAudio(trackID, b.maxFileBytes, format)
+func (b *TelegramBot) trySendCachedTrack(chatID int64, replyToID int, trackID string, settings ChatDownloadSettings) bool {
+	normalized := normalizeChatSettings(settings)
+	// 仅复用“歌词+封面均内嵌”的缓存音频，避免和关闭内嵌的设置混淆。
+	if !normalized.EmbedLyrics || !normalized.EmbedCover {
+		return false
+	}
+	entry, ok := b.getCachedAudio(trackID, b.maxFileBytes, normalized.Format)
 	if !ok {
 		return false
 	}
@@ -5572,7 +5643,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 		}
 
 		trackID := strings.TrimSpace(track.ID)
-		if !forceRefresh && trackID != "" && b.trySendCachedTrack(chatID, replyToID, trackID, settings.Format) {
+		if !forceRefresh && trackID != "" && b.trySendCachedTrack(chatID, replyToID, trackID, settings) {
 			sentAny = true
 			if status != nil {
 				status.Update(trackLabel+" (cached)", int64(idx+1), int64(totalTracks))
@@ -6678,25 +6749,29 @@ func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 		if normalized.SongZip {
 			songTransfer = "ZIP"
 		}
-		return fmt.Sprintf("Download settings:\n- Language: English\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Auto extra: lyrics=%t cover=%t animated=%t",
+		return fmt.Sprintf("Download settings:\n- Language: English\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Embed: lyrics=%t cover=%t\n- Auto extra files: lyrics=%t cover=%t animated=%t",
 			strings.ToUpper(normalized.Format),
 			normalized.AACType,
 			normalized.MVAudioType,
 			strings.ToUpper(normalized.LyricsFormat),
 			songTransfer,
 			workers,
+			normalized.EmbedLyrics,
+			normalized.EmbedCover,
 			normalized.AutoLyrics,
 			normalized.AutoCover,
 			normalized.AutoAnimated,
 		)
 	}
-	return fmt.Sprintf("下载设置：\n- 语言：中文\n- 格式：%s\n- AAC 类型：%s\n- MV 音频：%s\n- 歌词格式：%s\n- 歌曲发送：%s\n- 任务线程（全局）：%d\n- 自动附加：歌词=%t 封面=%t 动态封面=%t",
+	return fmt.Sprintf("下载设置：\n- 语言：中文\n- 格式：%s\n- AAC 类型：%s\n- MV 音频：%s\n- 歌词格式：%s\n- 歌曲发送：%s\n- 任务线程（全局）：%d\n- 内嵌：歌词=%t 封面=%t\n- 自动附加文件：歌词=%t 封面=%t 动态封面=%t",
 		strings.ToUpper(normalized.Format),
 		normalized.AACType,
 		normalized.MVAudioType,
 		strings.ToUpper(normalized.LyricsFormat),
 		songTransfer,
 		workers,
+		normalized.EmbedLyrics,
+		normalized.EmbedCover,
 		normalized.AutoLyrics,
 		normalized.AutoCover,
 		normalized.AutoAnimated,
@@ -6719,9 +6794,11 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 	lyricsLRCLabel := "Lyrics LRC"
 	lyricsTTMLLabel := "Lyrics TTML"
 	songZIPLabel := "Song ZIP"
-	autoLyricsLabel := "Auto Lyrics"
-	autoCoverLabel := "Auto Cover"
-	autoAnimatedLabel := "Auto Animated"
+	embedLyricsLabel := "Embed Lyrics"
+	embedCoverLabel := "Embed Cover"
+	autoLyricsLabel := "Extra Lyrics"
+	autoCoverLabel := "Extra Cover"
+	autoAnimatedLabel := "Extra Animated"
 	workerLabel := "Worker"
 	if lang != telegramLanguageEn {
 		binauralLabel = "双耳"
@@ -6732,9 +6809,11 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 		lyricsLRCLabel = "歌词 LRC"
 		lyricsTTMLLabel = "歌词 TTML"
 		songZIPLabel = "歌曲 ZIP"
-		autoLyricsLabel = "自动歌词"
-		autoCoverLabel = "自动封面"
-		autoAnimatedLabel = "自动动态封面"
+		embedLyricsLabel = "内嵌歌词"
+		embedCoverLabel = "内嵌封面"
+		autoLyricsLabel = "额外歌词"
+		autoCoverLabel = "额外封面"
+		autoAnimatedLabel = "额外动态封面"
 		workerLabel = "线程"
 	}
 	return InlineKeyboardMarkup{
@@ -6772,6 +6851,10 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 				{Text: settingButtonText(songZIPLabel, normalized.SongZip), CallbackData: "setting_song_zip"},
 			},
 			{
+				{Text: settingButtonText(embedLyricsLabel, normalized.EmbedLyrics), CallbackData: "setting_embed:lyrics"},
+				{Text: settingButtonText(embedCoverLabel, normalized.EmbedCover), CallbackData: "setting_embed:cover"},
+			},
+			{
 				{Text: settingButtonText(fmt.Sprintf("%s 1", workerLabel), workers == 1), CallbackData: "setting_worker:1"},
 				{Text: settingButtonText(fmt.Sprintf("%s 2", workerLabel), workers == 2), CallbackData: "setting_worker:2"},
 			},
@@ -6806,7 +6889,7 @@ func botHelpText() string {
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）
-/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/自动附加）
+/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/内嵌开关/自动附加）
 
 参数说明：
 - /s 的 <类型>：song | album | artist
@@ -6836,7 +6919,7 @@ Command list (short aliases):
 /cv <url|type id> Download static cover only
 /ac <url|type id> Download animated cover only
 /ly <song|album> Export lyrics files (format depends on settings)
-/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/auto extras/language)
+/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/embed toggles/auto extras/language)
 
 Parameters:
 - /s <type>: song | album | artist

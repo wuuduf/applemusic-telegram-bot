@@ -114,7 +114,7 @@ func handleExistingMusicVideoStage(ctx *musicVideoDownloadContext) bool {
 	fmt.Println(ctx.resp.Attributes.Name)
 	exists := false
 	if ctx.session.shouldReuseExistingFiles() {
-		exists, _ = fileExists(ctx.outputPath)
+		exists, _ = fileExistsNonEmpty(ctx.outputPath)
 	}
 	if !exists {
 		return false

@@ -228,7 +228,10 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	if err != nil {
 		return err
 	}
-	defer ofh.Close()
+	success := false
+	defer func() {
+		closeAndCleanupOutputFile(ofh, outfile, success)
+	}()
 	outBuf := bufio.NewWriter(ofh)
 	init, offset, err := ReadInitSegment(inBuf)
 	if err != nil {
@@ -333,7 +336,20 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	if err != nil {
 		return err
 	}
+	success = true
 	return nil
+}
+
+func closeAndCleanupOutputFile(file *os.File, path string, success bool) {
+	if file != nil {
+		_ = file.Close()
+	}
+	if success {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("Warning: failed to remove incomplete output %s: %v\n", path, err)
+	}
 }
 
 // Remove boxes in the init segment that are known to cause compatibility issues

@@ -179,7 +179,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	} else {
 		exists := false
 		if session.shouldReuseExistingFiles() {
-			exists, err = fileExists(filepath.Join(folderPath, "square_animated_artwork.mp4"))
+			exists, err = fileExistsNonEmpty(filepath.Join(folderPath, "square_animated_artwork.mp4"))
 			if err != nil {
 				fmt.Println("Failed to check if animated artwork square exists.")
 			}
@@ -212,7 +212,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	}
 	exists := false
 	if session.shouldReuseExistingFiles() {
-		exists, err = fileExists(filepath.Join(folderPath, "tall_animated_artwork.mp4"))
+		exists, err = fileExistsNonEmpty(filepath.Join(folderPath, "tall_animated_artwork.mp4"))
 		if err != nil {
 			fmt.Println("Failed to check if animated artwork tall exists.")
 		}
@@ -367,7 +367,7 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 		})
 	}
 	if isInArray(ctx.session.OkDict[ctx.station.ID], 1) {
-		if exists, _ := fileExists(trackPath); exists {
+		if exists, _ := fileExistsNonEmpty(trackPath); exists {
 			recordStationStream()
 		}
 		ctx.session.Counter.Success++
@@ -375,7 +375,7 @@ func downloadStationStreamStage(ctx *stationDownloadContext) error {
 	}
 	exists := false
 	if ctx.session.shouldReuseExistingFiles() {
-		exists, _ = fileExists(trackPath)
+		exists, _ = fileExistsNonEmpty(trackPath)
 	}
 	if exists {
 		recordStationStream()

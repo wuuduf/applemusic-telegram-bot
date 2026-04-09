@@ -426,6 +426,16 @@ func fileExists(path string) (bool, error) {
 	return false, err
 }
 
+func fileExistsNonEmpty(path string) (bool, error) {
+	f, err := os.Stat(path)
+	if err == nil {
+		return !f.IsDir() && f.Size() > 0, nil
+	} else if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 func checkUrl(url string) (string, string) {
 	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/album|\/album\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
 	matches := pat.FindAllStringSubmatch(url, -1)

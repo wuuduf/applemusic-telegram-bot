@@ -244,7 +244,7 @@ func handleTrackReuseStage(ctx *trackDownloadContext) bool {
 		return false
 	}
 
-	existsOriginal, err := fileExists(ctx.trackPath)
+	existsOriginal, err := fileExistsNonEmpty(ctx.trackPath)
 	if err != nil {
 		fmt.Println("Failed to check if track exists.")
 	}
@@ -254,7 +254,7 @@ func handleTrackReuseStage(ctx *trackDownloadContext) bool {
 		ctx.track.SaveName = filepath.Base(ctx.trackPath)
 		if ctx.conversionEnabled {
 			if ctx.considerConverted {
-				existsConverted, err2 := fileExists(ctx.convertedPath)
+				existsConverted, err2 := fileExistsNonEmpty(ctx.convertedPath)
 				if err2 == nil && existsConverted {
 					ctx.track.SavePath = ctx.convertedPath
 					ctx.track.SaveName = filepath.Base(ctx.convertedPath)
@@ -272,7 +272,7 @@ func handleTrackReuseStage(ctx *trackDownloadContext) bool {
 	}
 
 	if ctx.considerConverted {
-		existsConverted, err2 := fileExists(ctx.convertedPath)
+		existsConverted, err2 := fileExistsNonEmpty(ctx.convertedPath)
 		if err2 == nil && existsConverted {
 			fmt.Println("Converted track already exists locally.")
 			ctx.track.SavePath = ctx.convertedPath

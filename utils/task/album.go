@@ -3,10 +3,20 @@ package task
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
 )
+
+func isAlbumSongTrackType(trackType string) bool {
+	switch strings.ToLower(strings.TrimSpace(trackType)) {
+	case "song", "songs":
+		return true
+	default:
+		return false
+	}
+}
 
 type Album struct {
 	Context    context.Context
@@ -55,13 +65,20 @@ func (a *Album) GetResp(token, l string) error {
 	a.Name = albumData.Attributes.Name
 	//fmt.Println("Getting album response")
 	//从resp中的Tracks数据中提取trackData信息到新的Track结构体中
-	tracks := albumData.Relationships.Tracks.Data
+	rawTracks := albumData.Relationships.Tracks.Data
+	tracks := make([]ampapi.TrackRespData, 0, len(rawTracks))
+	for _, trackData := range rawTracks {
+		if !isAlbumSongTrackType(trackData.Type) {
+			continue
+		}
+		tracks = append(tracks, trackData)
+	}
 	discTotal := 0
 	if len(tracks) > 0 {
 		discTotal = tracks[len(tracks)-1].Attributes.DiscNumber
 	}
+	totalTracks := len(tracks)
 	for i, trackData := range tracks {
-		len := len(tracks)
 		a.Tracks = append(a.Tracks, Track{
 			Context:    ctx,
 			ID:         trackData.ID,
@@ -73,7 +90,7 @@ func (a *Album) GetResp(token, l string) error {
 			//SaveDir:   filepath.Join(a.SaveDir, a.SaveName),
 			//Codec:     a.Codec,
 			TaskNum:   i + 1,
-			TaskTotal: len,
+			TaskTotal: totalTracks,
 			M3u8:      trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
 			WebM3u8:   trackData.Attributes.ExtendedAssetUrls.EnhancedHls,
 			//CoverPath: a.CoverPath,

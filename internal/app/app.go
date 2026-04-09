@@ -1584,6 +1584,7 @@ const (
 	mediaTypeStation     = "station"
 	mediaTypeMusicVideo  = "music-video"
 	mediaTypeArtist      = "artist"
+	mediaTypeArtistSongs = "artist-songs"
 	mediaTypeAlbumLyrics = "album-lyrics"
 	mediaTypeArtistAsset = "artist-asset"
 )
@@ -1647,7 +1648,7 @@ func normalizeTelegramTaskType(taskType string) string {
 
 func telegramMediaProducesSongAudio(mediaType string) bool {
 	switch mediaType {
-	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs:
 		return true
 	default:
 		return false
@@ -1956,6 +1957,7 @@ func runTelegramBot(appleToken string) {
 		return
 	}
 	sharedstorage.ApplyTelegramStorageOverrides(&Config)
+	configureTelegramTempDir(&Config)
 	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 
@@ -2050,6 +2052,67 @@ func runTelegramBot(appleToken string) {
 		case <-time.After(defaultTelegramLoopRestartDelay):
 		}
 	}
+}
+
+func configureTelegramTempDir(cfg *structs.ConfigSet) {
+	if cfg == nil {
+		return
+	}
+
+	explicitTmp := strings.TrimSpace(os.Getenv("AMDL_TMPDIR"))
+	if explicitTmp == "" {
+		explicitTmp = strings.TrimSpace(os.Getenv("TMPDIR"))
+	}
+	if explicitTmp != "" {
+		clean := filepath.Clean(explicitTmp)
+		if err := os.MkdirAll(clean, 0755); err != nil {
+			fmt.Printf("Failed to prepare temp dir %s: %v\n", clean, err)
+			return
+		}
+		_ = os.Setenv("AMDL_TMPDIR", clean)
+		if strings.TrimSpace(os.Getenv("TMPDIR")) == "" {
+			_ = os.Setenv("TMPDIR", clean)
+		}
+		fmt.Printf("Telegram temp dir: %s (from environment)\n", clean)
+		return
+	}
+
+	base := resolveTelegramTempBaseDir(cfg)
+	if base == "" {
+		return
+	}
+	cleanBase := filepath.Clean(base)
+	if !filepath.IsAbs(cleanBase) {
+		if abs, err := filepath.Abs(cleanBase); err == nil {
+			cleanBase = abs
+		}
+	}
+	tmpDir := filepath.Join(cleanBase, ".tmp")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		fmt.Printf("Failed to create telegram temp dir %s: %v\n", tmpDir, err)
+		return
+	}
+	_ = os.Setenv("AMDL_TMPDIR", tmpDir)
+	_ = os.Setenv("TMPDIR", tmpDir)
+	fmt.Printf("Telegram temp dir: %s\n", tmpDir)
+}
+
+func resolveTelegramTempBaseDir(cfg *structs.ConfigSet) string {
+	if cfg == nil {
+		return ""
+	}
+	candidates := []string{
+		strings.TrimSpace(cfg.TelegramDownloadFolder),
+		strings.TrimSpace(cfg.AlacSaveFolder),
+		strings.TrimSpace(cfg.AtmosSaveFolder),
+		strings.TrimSpace(cfg.AacSaveFolder),
+	}
+	for _, candidate := range candidates {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func panicErrorWithStack(scope string, rec any) error {
@@ -3908,6 +3971,83 @@ func (b *TelegramBot) fetchArtistProfile(storefront string, artistID string) (st
 	return b.catalogService().FetchArtistProfile(storefront, artistID)
 }
 
+func collectUniqueArtistSongIDs(items []sharedcatalog.ArtistRelationshipItem) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		trackID := strings.TrimSpace(item.ID)
+		if trackID == "" {
+			continue
+		}
+		if _, ok := seen[trackID]; ok {
+			continue
+		}
+		seen[trackID] = struct{}{}
+		ids = append(ids, trackID)
+	}
+	return ids
+}
+
+func (b *TelegramBot) fetchArtistSongIDs(storefront string, artistID string) ([]string, error) {
+	artistID = strings.TrimSpace(artistID)
+	if artistID == "" {
+		return nil, fmt.Errorf("artist id is empty")
+	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	related, err := b.catalogService().FetchArtistRelationshipAll(storefront, artistID, "songs")
+	if err != nil {
+		return nil, err
+	}
+	return collectUniqueArtistSongIDs(related), nil
+}
+
+func buildArtistSongTrackStubs(trackIDs []string) []task.Track {
+	if len(trackIDs) == 0 {
+		return nil
+	}
+	total := len(trackIDs)
+	tracks := make([]task.Track, 0, total)
+	for idx, trackID := range trackIDs {
+		tracks = append(tracks, task.Track{
+			ID:        trackID,
+			TaskNum:   idx + 1,
+			TaskTotal: total,
+		})
+	}
+	return tracks
+}
+
+func (b *TelegramBot) downloadArtistSongsCollection(session *DownloadSession, artistID string, storefront string) error {
+	if session == nil {
+		return fmt.Errorf("download session is nil")
+	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	trackIDs, err := b.fetchArtistSongIDs(storefront, artistID)
+	if err != nil {
+		return err
+	}
+	for _, trackID := range trackIDs {
+		if err := session.downloadContext().Err(); err != nil {
+			return err
+		}
+		if err := ripSong(session, trackID, b.appleToken, storefront, session.Config.MediaUserToken); err != nil {
+			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
+				return ctxErr
+			}
+			fmt.Printf("Failed to rip artist song %s: %v\n", trackID, err)
+			session.Counter.Error++
+		}
+	}
+	return nil
+}
+
 func (b *TelegramBot) fetchArtwork(target *AppleURLTarget) (artworkFetchResult, error) {
 	if target == nil {
 		return artworkFetchResult{}, fmt.Errorf("invalid target")
@@ -4544,6 +4684,8 @@ func normalizeArtistRelationship(relationship string) string {
 		return "albums"
 	case "music-videos", "musicvideos", "music_video", "musicvideo", "mv", "mvs", "videos", "video":
 		return "music-videos"
+	case "songs", "song", "all-songs", "allsongs":
+		return "songs"
 	default:
 		return ""
 	}
@@ -4586,6 +4728,11 @@ func (b *TelegramBot) handleArtistModeSelection(chatID int64, messageID int, rel
 		return
 	}
 	replyToID := pending.ReplyToMessageID
+	if normalizedRelationship == "songs" {
+		b.clearPendingArtistModeByMessage(chatID, messageID)
+		b.promptMediaTransfer(chatID, mediaTypeArtistSongs, pending.ArtistID, pending.Storefront, pending.ArtistName, replyToID, false)
+		return
+	}
 	var (
 		items   []apputils.SearchResultItem
 		hasNext bool
@@ -5268,6 +5415,10 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 		enqueueWithRollback(func(session *DownloadSession) error {
 			return ripStation(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
 		})
+	case mediaTypeArtistSongs:
+		enqueueWithRollback(func(session *DownloadSession) error {
+			return b.downloadArtistSongsCollection(session, mediaID, storefront)
+		})
 	default:
 		b.releaseInflightDownload(inflightKey)
 		_ = b.sendMessageWithReply(chatID, "Unsupported collection type for transfer.", nil, replyToID)
@@ -5513,7 +5664,7 @@ func shouldUseTelegramCollectionSequentialOneByOne(single bool, transferMode str
 		return false
 	}
 	switch mediaType {
-	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs:
 		return true
 	default:
 		return false
@@ -5597,6 +5748,12 @@ func (b *TelegramBot) resolveCollectionTracksForSequential(session *DownloadSess
 			return nil, false, nil
 		}
 		return ctx.station.Tracks, false, nil
+	case mediaTypeArtistSongs:
+		trackIDs, err := b.fetchArtistSongIDs(storefront, mediaID)
+		if err != nil {
+			return nil, false, err
+		}
+		return buildArtistSongTrackStubs(trackIDs), false, nil
 	default:
 		return nil, false, fmt.Errorf("unsupported collection type for sequential handling: %s", mediaType)
 	}
@@ -5661,13 +5818,28 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 			continue
 		}
 
+		downloadFailed := false
 		// Keep core serialized to avoid heavy external tool contention.
 		func() {
 			b.downloadCoreMu.Lock()
 			defer b.downloadCoreMu.Unlock()
 			session.clearDownloadState()
+			if mediaType == mediaTypeArtistSongs {
+				if err := ripSong(session, trackID, b.appleToken, storefront, session.Config.MediaUserToken); err != nil {
+					if ctxErr := session.downloadContext().Err(); ctxErr != nil {
+						downloadFailed = true
+						return
+					}
+					fmt.Printf("Failed to rip artist song %s: %v\n", trackID, err)
+					session.Counter.Error++
+				}
+				return
+			}
 			ripTrack(session, track, b.appleToken, session.Config.MediaUserToken)
 		}()
+		if downloadFailed {
+			return true, sentAny, session.downloadContext().Err()
+		}
 
 		downloadedPaths := append([]string{}, session.LastDownloadedPaths...)
 		if len(downloadedPaths) == 0 {
@@ -5679,7 +5851,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 		downloadedAny = true
 
 		uploadPaths := downloadedPaths
-		if mediaType == mediaTypeAlbum {
+		if mediaType == mediaTypeAlbum || mediaType == mediaTypeArtistSongs {
 			uploadPaths = b.augmentDownloadedPaths(uploadPaths, settings)
 		}
 
@@ -5826,7 +5998,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		if len(paths) == 0 {
 			return errNoFilesDownloaded
 		}
-		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum {
+		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum || mediaType == mediaTypeArtistSongs {
 			paths = b.augmentDownloadedPaths(paths, settings)
 		}
 		return nil
@@ -6722,15 +6894,18 @@ func buildTransferKeyboard(lang string) InlineKeyboardMarkup {
 func buildArtistModeKeyboard(lang string) InlineKeyboardMarkup {
 	albumsText := "专辑"
 	musicVideosText := "音乐视频"
+	allSongsText := "全部歌曲"
 	if lang == telegramLanguageEn {
 		albumsText = "Albums"
 		musicVideosText = "Music Videos"
+		allSongsText = "All Songs"
 	}
 	return InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
 				{Text: albumsText, CallbackData: "artist_rel:albums"},
 				{Text: musicVideosText, CallbackData: "artist_rel:music-videos"},
+				{Text: allSongsText, CallbackData: "artist_rel:songs"},
 			},
 			{
 				{Text: "❌", CallbackData: "panel_cancel"},

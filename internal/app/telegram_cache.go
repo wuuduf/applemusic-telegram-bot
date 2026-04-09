@@ -451,7 +451,7 @@ func (b *TelegramBot) purgeTargetCaches(target *AppleURLTarget) int {
 	case mediaTypeSong:
 		removed += deleteCacheEntriesWithPrefix(b.cache, mediaID+"|")
 		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaTypeSong+":"+mediaID+"|")
-	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation:
+	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs:
 		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaType+":"+mediaID+"|")
 	case mediaTypeMusicVideo:
 		prefix := mediaTypeMusicVideo + ":" + mediaID + "|"

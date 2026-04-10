@@ -119,6 +119,56 @@ func TestFetchArtistRelationshipAll(t *testing.T) {
 	}
 }
 
+func TestFetchArtistRelationshipAllSongsUsesRelationshipLimitAndNextOffset(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		requests++
+		offset := r.URL.Query().Get("offset")
+		limit := r.URL.Query().Get("limit")
+		switch requests {
+		case 1:
+			if offset != "0" {
+				t.Fatalf("expected first songs offset=0, got %q", offset)
+			}
+			if limit != "20" {
+				t.Fatalf("expected first songs limit=20, got %q", limit)
+			}
+			_, _ = io.WriteString(w, `{"next":"/v1/catalog/us/artists/artist-1/songs?offset=20","data":[{"id":"song-1","attributes":{"name":"Song One","url":"https://example.com/song-1","releaseDate":"2024-01-01","artistName":"Artist One","albumName":"Album One"}}]}`)
+		case 2:
+			if offset != "20" {
+				t.Fatalf("expected second songs offset=20, got %q", offset)
+			}
+			if limit != "20" {
+				t.Fatalf("expected second songs limit=20, got %q", limit)
+			}
+			_, _ = io.WriteString(w, `{"data":[{"id":"song-2","attributes":{"name":"Song Two","url":"https://example.com/song-2","releaseDate":"2025-01-01","artistName":"Artist One","albumName":"Album Two"}}]}`)
+		default:
+			t.Fatalf("unexpected request count: %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{
+		AppleToken: "token",
+		HTTPClient: client,
+		UserAgent:  defaultUserAgent,
+	}
+
+	items, err := service.FetchArtistRelationshipAll("us", "artist-1", "songs")
+	if err != nil {
+		t.Fatalf("FetchArtistRelationshipAll songs failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 song relationship items, got %d", len(items))
+	}
+	if items[0].ID != "song-1" || items[1].ID != "song-2" {
+		t.Fatalf("unexpected song relationship items: %#v", items)
+	}
+}
+
 func TestExportAlbumLyricsWritesFilesAndCountsFailures(t *testing.T) {
 	tmpDir := t.TempDir()
 	service := &Service{

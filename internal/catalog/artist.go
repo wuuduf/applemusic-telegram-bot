@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -46,6 +47,36 @@ type artistRelationshipPage struct {
 	} `json:"data"`
 }
 
+func artistRelationshipPageLimit(relationship string) int {
+	switch strings.ToLower(strings.TrimSpace(relationship)) {
+	case "songs":
+		return 20
+	default:
+		return 100
+	}
+}
+
+func artistRelationshipNextURL(storefront string, artistID string, relationship string, nextPath string) string {
+	nextPath = strings.TrimSpace(nextPath)
+	if nextPath == "" {
+		return ""
+	}
+	if strings.HasPrefix(nextPath, "http://") || strings.HasPrefix(nextPath, "https://") {
+		return nextPath
+	}
+	if strings.HasPrefix(nextPath, "/") {
+		return "https://amp-api.music.apple.com" + nextPath
+	}
+	base := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, relationship)
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	baseURL.Path = path.Join(path.Dir(baseURL.Path), nextPath)
+	baseURL.RawQuery = ""
+	return baseURL.String()
+}
+
 func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string, relationship string) ([]ArtistRelationshipItem, error) {
 	storefront = strings.TrimSpace(storefront)
 	artistID = strings.TrimSpace(artistID)
@@ -54,20 +85,26 @@ func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string,
 		return nil, fmt.Errorf("invalid artist relationship query")
 	}
 
+	pageURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, relationship)
+	pageLimit := artistRelationshipPageLimit(relationship)
 	apiOffset := 0
 	items := make([]ArtistRelationshipItem, 0)
 	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, relationship), nil)
+		req, err := http.NewRequest("GET", pageURL, nil)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.AppleToken))
 		req.Header.Set("User-Agent", s.userAgent())
 		req.Header.Set("Origin", "https://music.apple.com")
-		query := url.Values{}
-		query.Set("limit", "100")
-		query.Set("offset", strconv.Itoa(apiOffset))
-		if strings.TrimSpace(s.Language) != "" {
+		query := req.URL.Query()
+		if query.Get("limit") == "" {
+			query.Set("limit", strconv.Itoa(pageLimit))
+		}
+		if query.Get("offset") == "" {
+			query.Set("offset", strconv.Itoa(apiOffset))
+		}
+		if strings.TrimSpace(s.Language) != "" && query.Get("l") == "" {
 			query.Set("l", s.Language)
 		}
 		req.URL.RawQuery = query.Encode()
@@ -103,7 +140,8 @@ func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string,
 		if page.Next == "" {
 			break
 		}
-		apiOffset += 100
+		pageURL = artistRelationshipNextURL(storefront, artistID, relationship, page.Next)
+		apiOffset += pageLimit
 	}
 	return items, nil
 }

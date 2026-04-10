@@ -1554,6 +1554,7 @@ const (
 	defaultTelegramGetUpdatesErrorSleep       = 2 * time.Second
 	defaultTelegramGetUpdatesConflictSleep    = 5 * time.Second
 	defaultTelegramGetUpdatesRestartThreshold = 30
+	defaultTelegramDailyRestartDeferCheck     = 30 * time.Second
 	telegramAutoDeleteAfter                   = 2 * time.Minute
 	minTelegramPollTimeout                    = 35 * time.Second
 	telegramDialTimeout                       = 20 * time.Second
@@ -1738,6 +1739,7 @@ type TelegramBot struct {
 	autoDeleteMu       sync.Mutex
 	autoDeleteMessages map[string]*time.Timer
 	autoDeleteSticky   map[string]bool
+	autoDeleteDeadline map[string]time.Time
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -1991,19 +1993,40 @@ func runTelegramBot(appleToken string) {
 		}()
 
 		reason := "loop-exit"
-		select {
-		case <-signalCtx.Done():
-			reason = "signal"
-			fmt.Println("Telegram bot shutdown requested.")
-		case <-restartCh:
-			reason = "daily-restart"
-			fmt.Println("Telegram daily auto-restart triggered.")
-		case <-loopDone:
-			if bot.isShuttingDown() {
-				reason = "shutdown"
-			} else {
-				reason = "loop-exit"
-				fmt.Println("Telegram loop stopped unexpectedly. Restarting bot runtime.")
+		dailyRestartDeferred := false
+	waitLoop:
+		for {
+			select {
+			case <-signalCtx.Done():
+				reason = "signal"
+				fmt.Println("Telegram bot shutdown requested.")
+				break waitLoop
+			case <-restartCh:
+				load := bot.dailyRestartTaskLoad()
+				if load.hasPendingWork() {
+					dailyRestartDeferred = true
+					fmt.Printf("Telegram daily auto-restart deferred for %s because tasks are still active (%s)\n", defaultTelegramDailyRestartDeferCheck, load)
+					if restartTimer != nil {
+						restartTimer.Reset(defaultTelegramDailyRestartDeferCheck)
+						restartCh = restartTimer.C
+					}
+					continue
+				}
+				reason = "daily-restart"
+				if dailyRestartDeferred {
+					fmt.Println("Telegram daily auto-restart triggered after active tasks drained.")
+				} else {
+					fmt.Println("Telegram daily auto-restart triggered.")
+				}
+				break waitLoop
+			case <-loopDone:
+				if bot.isShuttingDown() {
+					reason = "shutdown"
+				} else {
+					reason = "loop-exit"
+					fmt.Println("Telegram loop stopped unexpectedly. Restarting bot runtime.")
+				}
+				break waitLoop
 			}
 		}
 		if restartTimer != nil {
@@ -2026,7 +2049,6 @@ func runTelegramBot(appleToken string) {
 		}
 
 		bot.stopDownloadWorkers()
-		bot.clearAllAutoDeleteMessages()
 		if bot.cleanupTracker != nil {
 			bot.cleanupTracker.stop()
 		}
@@ -2035,6 +2057,7 @@ func runTelegramBot(appleToken string) {
 		}
 		bot.stopMetricsReporter()
 		bot.stopStateSaver()
+		bot.clearAllAutoDeleteMessages()
 
 		switch reason {
 		case "signal":
@@ -2482,6 +2505,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		activeRequests:          make(map[string]telegramPersistedRequest),
 		autoDeleteMessages:      make(map[string]*time.Timer),
 		autoDeleteSticky:        make(map[string]bool),
+		autoDeleteDeadline:      make(map[string]time.Time),
 		sendLimiter:             newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
 		shutdownCtx:             shutdownCtx,
 		shutdownCancel:          shutdownCancel,
@@ -3188,12 +3212,16 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 }
 
 func (b *TelegramBot) cancelPanelAndDelete(chatID int64, messageID int) {
-	b.clearPendingByMessage(chatID, messageID)
-	b.clearPendingTransferByMessage(chatID, messageID)
-	b.clearPendingArtistModeByMessage(chatID, messageID)
+	b.clearPanelStateByMessage(chatID, messageID)
 	if err := b.deleteMessage(chatID, messageID); err != nil {
 		_ = b.editMessageText(chatID, messageID, b.localizeOutgoingText(chatID, "已取消。"), nil)
 	}
+}
+
+func (b *TelegramBot) clearPanelStateByMessage(chatID int64, messageID int) {
+	b.clearPendingByMessage(chatID, messageID)
+	b.clearPendingTransferByMessage(chatID, messageID)
+	b.clearPendingArtistModeByMessage(chatID, messageID)
 }
 
 func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
@@ -6468,6 +6496,10 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 	if messageID == 0 {
 		return nil
 	}
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
+		return err
+	}
 	text = b.localizeOutgoingText(chatID, text)
 	payload := map[string]any{
 		"chat_id":    chatID,
@@ -6481,7 +6513,7 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("editMessageText"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("editMessageText"), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -6531,6 +6563,11 @@ func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 		return nil
 	}
 	b.clearAutoDeleteMessage(chatID, messageID)
+	b.clearPanelStateByMessage(chatID, messageID)
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
+		return err
+	}
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
@@ -6539,7 +6576,7 @@ func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("deleteMessage"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("deleteMessage"), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -6549,7 +6586,45 @@ func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 		return err
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		apiResp := apiResponse{}
+		if err := json.Unmarshal(responseBody, &apiResp); err == nil && strings.TrimSpace(apiResp.Description) != "" {
+			if isIgnorableDeleteMessageError(apiResp.Description) {
+				return nil
+			}
+			err = fmt.Errorf("telegram deleteMessage failed: %s", strings.TrimSpace(apiResp.Description))
+			b.noteTelegramRateLimit(err)
+			return err
+		}
+		err = fmt.Errorf("telegram deleteMessage failed: %s", strings.TrimSpace(string(responseBody)))
+		b.noteTelegramRateLimit(err)
+		return err
+	}
+	if len(bytes.TrimSpace(responseBody)) == 0 {
+		return nil
+	}
+	apiResp := apiResponse{}
+	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
+		return err
+	}
+	if !apiResp.OK {
+		if isIgnorableDeleteMessageError(apiResp.Description) {
+			return nil
+		}
+		err = fmt.Errorf("telegram deleteMessage error: %s", apiResp.Description)
+		b.noteTelegramRateLimit(err)
+		return err
+	}
 	return nil
+}
+
+func isIgnorableDeleteMessageError(description string) bool {
+	desc := strings.ToLower(strings.TrimSpace(description))
+	return strings.Contains(desc, "message to delete not found")
 }
 
 func (b *TelegramBot) getUpdates(offset int) ([]Update, error) {
@@ -7318,11 +7393,39 @@ func autoDeleteKey(chatID int64, messageID int) string {
 	return fmt.Sprintf("%d:%d", chatID, messageID)
 }
 
+func parseAutoDeleteKey(key string) (int64, int, bool) {
+	parts := strings.Split(strings.TrimSpace(key), ":")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || chatID == 0 {
+		return 0, 0, false
+	}
+	messageID, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || messageID <= 0 {
+		return 0, 0, false
+	}
+	return chatID, messageID, true
+}
+
 func (b *TelegramBot) scheduleAutoDeleteMessage(chatID int64, messageID int, sticky bool) {
+	b.scheduleAutoDeleteMessageAt(chatID, messageID, sticky, time.Now().Add(telegramAutoDeleteAfter))
+}
+
+func (b *TelegramBot) scheduleAutoDeleteMessageAt(chatID int64, messageID int, sticky bool, deleteAt time.Time) {
 	if b == nil || messageID <= 0 || chatID == 0 {
 		return
 	}
+	if deleteAt.IsZero() {
+		deleteAt = time.Now().Add(telegramAutoDeleteAfter)
+	}
+	delay := time.Until(deleteAt)
+	if delay < 0 {
+		delay = 0
+	}
 	key := autoDeleteKey(chatID, messageID)
+	var timer *time.Timer
 	b.autoDeleteMu.Lock()
 	if b.autoDeleteMessages == nil {
 		b.autoDeleteMessages = make(map[string]*time.Timer)
@@ -7330,68 +7433,97 @@ func (b *TelegramBot) scheduleAutoDeleteMessage(chatID int64, messageID int, sti
 	if b.autoDeleteSticky == nil {
 		b.autoDeleteSticky = make(map[string]bool)
 	}
+	if b.autoDeleteDeadline == nil {
+		b.autoDeleteDeadline = make(map[string]time.Time)
+	}
 	if existing := b.autoDeleteMessages[key]; existing != nil {
 		existing.Stop()
 	}
 	b.autoDeleteSticky[key] = sticky
-	timer := time.AfterFunc(telegramAutoDeleteAfter, func() {
+	b.autoDeleteDeadline[key] = deleteAt
+	timer = time.AfterFunc(delay, func() {
 		b.autoDeleteMu.Lock()
-		stickyNow := b.autoDeleteSticky[key]
-		timerNow := b.autoDeleteMessages[key]
-		if timerNow != nil {
-			delete(b.autoDeleteMessages, key)
-		}
-		delete(b.autoDeleteSticky, key)
-		b.autoDeleteMu.Unlock()
-		if stickyNow {
-			// sticky panel means "delete if no interaction"; interaction removes tracking entry.
-			_ = b.deleteMessage(chatID, messageID)
+		if b.autoDeleteMessages[key] != timer {
+			b.autoDeleteMu.Unlock()
 			return
 		}
+		delete(b.autoDeleteMessages, key)
+		delete(b.autoDeleteSticky, key)
+		delete(b.autoDeleteDeadline, key)
+		b.autoDeleteMu.Unlock()
+		b.requestStateSave()
 		_ = b.deleteMessage(chatID, messageID)
 	})
 	b.autoDeleteMessages[key] = timer
 	b.autoDeleteMu.Unlock()
+	b.requestStateSave()
 }
 
 func (b *TelegramBot) markMessageInteraction(chatID int64, messageID int) {
 	key := autoDeleteKey(chatID, messageID)
 	b.autoDeleteMu.Lock()
-	timer := b.autoDeleteMessages[key]
 	sticky := b.autoDeleteSticky[key]
-	if sticky {
-		if timer != nil {
-			timer.Stop()
-		}
-		delete(b.autoDeleteMessages, key)
-		delete(b.autoDeleteSticky, key)
-	}
 	b.autoDeleteMu.Unlock()
+	if sticky {
+		// 交互面板每次操作都刷新自动删除计时，避免“点击过一次后永久不删”。
+		b.scheduleAutoDeleteMessage(chatID, messageID, true)
+	}
 }
 
 func (b *TelegramBot) clearAutoDeleteMessage(chatID int64, messageID int) {
+	if b == nil || messageID <= 0 || chatID == 0 {
+		return
+	}
 	key := autoDeleteKey(chatID, messageID)
+	changed := false
 	b.autoDeleteMu.Lock()
 	if timer := b.autoDeleteMessages[key]; timer != nil {
 		timer.Stop()
+		changed = true
 	}
-	delete(b.autoDeleteMessages, key)
-	delete(b.autoDeleteSticky, key)
+	if _, ok := b.autoDeleteMessages[key]; ok {
+		delete(b.autoDeleteMessages, key)
+		changed = true
+	}
+	if _, ok := b.autoDeleteSticky[key]; ok {
+		delete(b.autoDeleteSticky, key)
+		changed = true
+	}
+	if _, ok := b.autoDeleteDeadline[key]; ok {
+		delete(b.autoDeleteDeadline, key)
+		changed = true
+	}
 	b.autoDeleteMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
 }
 
 func (b *TelegramBot) clearAllAutoDeleteMessages() {
+	if b == nil {
+		return
+	}
+	changed := false
 	b.autoDeleteMu.Lock()
 	for key, timer := range b.autoDeleteMessages {
 		if timer != nil {
 			timer.Stop()
 		}
 		delete(b.autoDeleteMessages, key)
+		changed = true
 	}
 	for key := range b.autoDeleteSticky {
 		delete(b.autoDeleteSticky, key)
+		changed = true
+	}
+	for key := range b.autoDeleteDeadline {
+		delete(b.autoDeleteDeadline, key)
+		changed = true
 	}
 	b.autoDeleteMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
 }
 
 func formatChatIDTextLegacy(chatID int64) string {

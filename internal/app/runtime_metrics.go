@@ -43,6 +43,14 @@ type taskTypeCurrentStats struct {
 	RunningCurrent int
 }
 
+type telegramTaskLoad struct {
+	Queued   int
+	Active   int
+	Limit    int
+	Inflight int
+	Tracked  int
+}
+
 var appRuntimeMetrics = &runtimeMetrics{}
 
 func (m *runtimeMetrics) recordUploadSuccess() {
@@ -223,6 +231,28 @@ func (b *TelegramBot) inflightCount() int {
 	b.inflightMu.Lock()
 	defer b.inflightMu.Unlock()
 	return len(b.inflightDownloads)
+}
+
+func (b *TelegramBot) dailyRestartTaskLoad() telegramTaskLoad {
+	if b == nil {
+		return telegramTaskLoad{}
+	}
+	queued, active, limit := b.queueStats()
+	return telegramTaskLoad{
+		Queued:   queued,
+		Active:   active,
+		Limit:    limit,
+		Inflight: b.inflightCount(),
+		Tracked:  b.trackedRequestCount(),
+	}
+}
+
+func (l telegramTaskLoad) hasPendingWork() bool {
+	return l.Queued > 0 || l.Active > 0 || l.Inflight > 0
+}
+
+func (l telegramTaskLoad) String() string {
+	return fmt.Sprintf("queue=%d active=%d/%d inflight=%d tracked=%d", l.Queued, l.Active, l.Limit, l.Inflight, l.Tracked)
 }
 
 func orderedTaskTypes(taskTotals map[string]taskTypeLifecycleTotals, current map[string]taskTypeCurrentStats) []string {

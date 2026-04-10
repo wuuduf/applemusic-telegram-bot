@@ -89,7 +89,13 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 		chatSettings: map[int64]ChatDownloadSettings{
 			1: {Format: telegramFormatAlac, Language: telegramLanguageEn, SettingsInited: true},
 		},
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
+		autoDeleteDeadline: make(map[string]time.Time),
 	}
+	autoDeleteAt := time.Now().Add(5 * time.Minute)
+	b.scheduleAutoDeleteMessageAt(1, 99, true, autoDeleteAt)
+	defer b.clearAllAutoDeleteMessages()
 
 	if err := b.saveRuntimeStateNow(); err != nil {
 		t.Fatalf("saveRuntimeStateNow failed: %v", err)
@@ -106,6 +112,16 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(loaded.InflightKeys) != 1 || loaded.InflightKeys[0] != "k1" {
 		t.Fatalf("expected inflight keys derived from requests, got %+v", loaded.InflightKeys)
+	}
+	if len(loaded.AutoDelete) != 1 {
+		t.Fatalf("expected persisted auto-delete entries, got %+v", loaded.AutoDelete)
+	}
+	autoDelete := loaded.AutoDelete[0]
+	if autoDelete.ChatID != 1 || autoDelete.MessageID != 99 || !autoDelete.Sticky {
+		t.Fatalf("unexpected auto-delete entry: %+v", autoDelete)
+	}
+	if autoDelete.DeleteAt.IsZero() {
+		t.Fatalf("expected persisted auto-delete deadline")
 	}
 	if loaded.ChatSettings[1].Language != telegramLanguageEn {
 		t.Fatalf("expected persisted chat language to be en, got %+v", loaded.ChatSettings[1])
@@ -193,6 +209,64 @@ func TestTelegramRuntimeStateRestoreQueuesRecoveredRequests(t *testing.T) {
 	}
 	if _, ok := b.inflightDownloads["k-song-1"]; !ok {
 		t.Fatalf("expected recovered inflight key")
+	}
+}
+
+func TestTelegramRuntimeStateRestoreSchedulesAutoDeleteTimers(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	deleteAt := time.Now().Add(10 * time.Minute)
+	state := telegramPersistedState{
+		Version: telegramStateVersion,
+		AutoDelete: []telegramPersistedAutoDelete{
+			{
+				ChatID:    2024,
+				MessageID: 88,
+				Sticky:    true,
+				DeleteAt:  deleteAt,
+			},
+		},
+	}
+	payload, err := jsonMarshalIndentForTest(state)
+	if err != nil {
+		t.Fatalf("marshal state failed: %v", err)
+	}
+	if err := os.WriteFile(statePath, payload, 0644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	b := &TelegramBot{
+		stateFile:          statePath,
+		appleToken:         "token",
+		pending:            make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:   make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes: make(map[int64]map[int]*PendingArtistMode),
+		chatSettings:       make(map[int64]ChatDownloadSettings),
+		inflightDownloads:  make(map[string]struct{}),
+		activeRequests:     make(map[string]telegramPersistedRequest),
+		downloadQueue:      make(chan *downloadRequest, 1),
+		stateSave:          make(chan struct{}, 1),
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
+		autoDeleteDeadline: make(map[string]time.Time),
+	}
+	b.restoreRuntimeState()
+	defer b.clearAllAutoDeleteMessages()
+
+	key := autoDeleteKey(2024, 88)
+	b.autoDeleteMu.Lock()
+	_, hasTimer := b.autoDeleteMessages[key]
+	sticky := b.autoDeleteSticky[key]
+	restoredDeleteAt := b.autoDeleteDeadline[key]
+	b.autoDeleteMu.Unlock()
+	if !hasTimer {
+		t.Fatalf("expected restored auto-delete timer")
+	}
+	if !sticky {
+		t.Fatalf("expected restored sticky auto-delete marker")
+	}
+	if restoredDeleteAt.IsZero() {
+		t.Fatalf("expected restored auto-delete deadline")
 	}
 }
 
@@ -610,6 +684,46 @@ func TestTelegramDailyRestartEnabledDefaultsAndOverride(t *testing.T) {
 	Config.TelegramDailyRestartEnabled = &enabled
 	if !telegramDailyRestartEnabled() {
 		t.Fatalf("expected daily restart enabled when configured true")
+	}
+}
+
+func TestDailyRestartTaskLoadPendingWork(t *testing.T) {
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 3),
+		workerLimit:       2,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+	}
+	b.downloadQueue <- &downloadRequest{requestID: "queued-1"}
+	b.activeWorkers = 1
+	b.inflightDownloads["song:1"] = struct{}{}
+	b.activeRequests["req-1"] = telegramPersistedRequest{RequestID: "req-1", State: "running"}
+
+	load := b.dailyRestartTaskLoad()
+
+	if !load.hasPendingWork() {
+		t.Fatalf("expected pending work for daily restart, got %+v", load)
+	}
+	if load.Queued != 1 || load.Active != 1 || load.Limit != 2 || load.Inflight != 1 || load.Tracked != 1 {
+		t.Fatalf("unexpected daily restart task load: %+v", load)
+	}
+	if got, want := load.String(), "queue=1 active=1/2 inflight=1 tracked=1"; got != want {
+		t.Fatalf("task load string mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestDailyRestartTaskLoadIdle(t *testing.T) {
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 1),
+		workerLimit:       1,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+	}
+
+	load := b.dailyRestartTaskLoad()
+
+	if load.hasPendingWork() {
+		t.Fatalf("expected idle load, got %+v", load)
 	}
 }
 

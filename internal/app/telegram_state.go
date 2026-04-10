@@ -30,6 +30,13 @@ type telegramPersistedRequest struct {
 	UpdatedAt    time.Time            `json:"updated_at"`
 }
 
+type telegramPersistedAutoDelete struct {
+	ChatID    int64     `json:"chat_id"`
+	MessageID int       `json:"message_id"`
+	Sticky    bool      `json:"sticky,omitempty"`
+	DeleteAt  time.Time `json:"delete_at"`
+}
+
 type telegramPersistedState struct {
 	Version            int                                 `json:"version"`
 	SavedAt            time.Time                           `json:"saved_at"`
@@ -38,6 +45,7 @@ type telegramPersistedState struct {
 	PendingArtistModes map[int64]map[int]PendingArtistMode `json:"pending_artist_modes,omitempty"`
 	Requests           []telegramPersistedRequest          `json:"requests,omitempty"`
 	InflightKeys       []string                            `json:"inflight_keys,omitempty"`
+	AutoDelete         []telegramPersistedAutoDelete       `json:"auto_delete,omitempty"`
 	ChatSettings       map[int64]ChatDownloadSettings      `json:"chat_settings,omitempty"`
 	SearchMeta         map[string]AudioMeta                `json:"search_meta,omitempty"`
 }
@@ -232,6 +240,7 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 		PendingArtistModes: make(map[int64]map[int]PendingArtistMode),
 		Requests:           []telegramPersistedRequest{},
 		InflightKeys:       []string{},
+		AutoDelete:         []telegramPersistedAutoDelete{},
 		ChatSettings:       make(map[int64]ChatDownloadSettings),
 		SearchMeta:         make(map[string]AudioMeta),
 	}
@@ -306,6 +315,24 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 		state.InflightKeys = append(state.InflightKeys, key)
 	}
 
+	b.autoDeleteMu.Lock()
+	for key, deleteAt := range b.autoDeleteDeadline {
+		if deleteAt.IsZero() {
+			continue
+		}
+		chatID, messageID, ok := parseAutoDeleteKey(key)
+		if !ok {
+			continue
+		}
+		state.AutoDelete = append(state.AutoDelete, telegramPersistedAutoDelete{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Sticky:    b.autoDeleteSticky[key],
+			DeleteAt:  deleteAt,
+		})
+	}
+	b.autoDeleteMu.Unlock()
+
 	b.settingsMu.Lock()
 	for chatID, settings := range b.chatSettings {
 		state.ChatSettings[chatID] = settings
@@ -332,6 +359,9 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	}
 	if len(state.InflightKeys) == 0 {
 		state.InflightKeys = nil
+	}
+	if len(state.AutoDelete) == 0 {
+		state.AutoDelete = nil
 	}
 	if len(state.ChatSettings) == 0 {
 		state.ChatSettings = nil
@@ -407,6 +437,20 @@ func (b *TelegramBot) restoreRuntimeState() {
 	}
 	b.artistModeMu.Unlock()
 
+	b.clearAllAutoDeleteMessages()
+	recoveredAutoDelete := 0
+	for _, entry := range state.AutoDelete {
+		if entry.ChatID == 0 || entry.MessageID <= 0 {
+			continue
+		}
+		deleteAt := entry.DeleteAt
+		if deleteAt.IsZero() {
+			deleteAt = time.Now().Add(telegramAutoDeleteAfter)
+		}
+		b.scheduleAutoDeleteMessageAt(entry.ChatID, entry.MessageID, entry.Sticky, deleteAt)
+		recoveredAutoDelete++
+	}
+
 	b.settingsMu.Lock()
 	if b.chatSettings == nil {
 		b.chatSettings = make(map[int64]ChatDownloadSettings)
@@ -474,8 +518,8 @@ func (b *TelegramBot) restoreRuntimeState() {
 			b.untrackRequest(request.RequestID)
 		}
 	}
-	if recovered > 0 || dropped > 0 {
-		fmt.Printf("telegram runtime recovery: queued=%d dropped=%d\n", recovered, dropped)
+	if recovered > 0 || dropped > 0 || recoveredAutoDelete > 0 {
+		fmt.Printf("telegram runtime recovery: queued=%d dropped=%d auto_delete=%d\n", recovered, dropped, recoveredAutoDelete)
 	}
 	b.requestStateSave()
 }

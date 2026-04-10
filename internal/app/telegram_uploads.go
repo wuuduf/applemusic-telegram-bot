@@ -1316,6 +1316,10 @@ func (b *TelegramBot) sendMessageWithReply(chatID int64, text string, markup any
 }
 
 func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, markup any, replyToID int) (int, error) {
+	ctx := b.operationContext()
+	if err := b.waitTelegramSend(ctx, chatID); err != nil {
+		return 0, err
+	}
 	text = b.localizeOutgoingText(chatID, text)
 	payload := map[string]any{
 		"chat_id": chatID,
@@ -1331,7 +1335,7 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequest("POST", b.apiURL("sendMessage"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendMessage"), bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}

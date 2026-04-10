@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1025,6 +1026,76 @@ func TestSendAudioFileRespectsSessionContextLimiterWait(t *testing.T) {
 	}
 }
 
+func TestSendMessageWithReplyReturnRespectsLimiterWait(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	limiter := newTelegramSendLimiter(time.Hour, 0)
+	if limiter == nil {
+		t.Fatalf("expected limiter")
+	}
+	limiter.lastAll = time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bot := &TelegramBot{
+		token:       "test-token",
+		apiBase:     server.URL,
+		client:      server.Client(),
+		sendLimiter: limiter,
+		shutdownCtx: ctx,
+	}
+
+	_, err := bot.sendMessageWithReplyReturn(42, "hello", nil, 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected no HTTP request when limiter wait is canceled, got %d", got)
+	}
+}
+
+func TestEditMessageTextRespectsLimiterWait(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	limiter := newTelegramSendLimiter(time.Hour, 0)
+	if limiter == nil {
+		t.Fatalf("expected limiter")
+	}
+	limiter.lastAll = time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bot := &TelegramBot{
+		token:       "test-token",
+		apiBase:     server.URL,
+		client:      server.Client(),
+		sendLimiter: limiter,
+		shutdownCtx: ctx,
+	}
+
+	err := bot.editMessageText(42, 7, "hello", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected no HTTP request when limiter wait is canceled, got %d", got)
+	}
+}
+
 func TestHandleTrackReuseStageRecordsSourceFormatWhenConversionFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	trackPath := filepath.Join(tmpDir, "song.m4a")
@@ -1282,14 +1353,16 @@ func TestLocalizeOutgoingTextUsagePrefix(t *testing.T) {
 	}
 }
 
-func TestAutoDeleteStickyInteractionCancelsTimer(t *testing.T) {
+func TestAutoDeleteStickyInteractionReschedulesTimer(t *testing.T) {
 	b := &TelegramBot{
 		autoDeleteMessages: make(map[string]*time.Timer),
 		autoDeleteSticky:   make(map[string]bool),
+		autoDeleteDeadline: make(map[string]time.Time),
 	}
 	b.scheduleAutoDeleteMessage(1001, 42, true)
 	key := autoDeleteKey(1001, 42)
 	b.autoDeleteMu.Lock()
+	initialDeadline := b.autoDeleteDeadline[key]
 	_, existsBefore := b.autoDeleteMessages[key]
 	b.autoDeleteMu.Unlock()
 	if !existsBefore {
@@ -1297,10 +1370,18 @@ func TestAutoDeleteStickyInteractionCancelsTimer(t *testing.T) {
 	}
 	b.markMessageInteraction(1001, 42)
 	b.autoDeleteMu.Lock()
+	updatedDeadline := b.autoDeleteDeadline[key]
+	sticky := b.autoDeleteSticky[key]
 	_, existsAfter := b.autoDeleteMessages[key]
 	b.autoDeleteMu.Unlock()
-	if existsAfter {
-		t.Fatalf("expected sticky timer to be removed after interaction")
+	if !existsAfter {
+		t.Fatalf("expected sticky timer to remain tracked after interaction")
+	}
+	if !sticky {
+		t.Fatalf("expected sticky marker to be kept after interaction")
+	}
+	if !updatedDeadline.After(initialDeadline) {
+		t.Fatalf("expected interaction to extend auto-delete deadline, before=%s after=%s", initialDeadline, updatedDeadline)
 	}
 }
 
@@ -1308,6 +1389,7 @@ func TestDownloadStatusFinishFailureSchedulesAutoDelete(t *testing.T) {
 	b := &TelegramBot{
 		autoDeleteMessages: make(map[string]*time.Timer),
 		autoDeleteSticky:   make(map[string]bool),
+		autoDeleteDeadline: make(map[string]time.Time),
 	}
 	status := &DownloadStatus{
 		bot:       b,
@@ -1323,6 +1405,44 @@ func TestDownloadStatusFinishFailureSchedulesAutoDelete(t *testing.T) {
 	b.autoDeleteMu.Unlock()
 	if !exists {
 		t.Fatalf("expected failure status to schedule auto-delete")
+	}
+}
+
+func TestDeleteMessageReturnsTelegramAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"description":"Bad Request: message can't be deleted"}`))
+	}))
+	defer server.Close()
+
+	b := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+	err := b.deleteMessage(1001, 42)
+	if err == nil {
+		t.Fatalf("expected deleteMessage error when telegram rejects delete")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "deletemessage") {
+		t.Fatalf("unexpected deleteMessage error: %v", err)
+	}
+}
+
+func TestDeleteMessageIgnoresNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"description":"Bad Request: message to delete not found"}`))
+	}))
+	defer server.Close()
+
+	b := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+	if err := b.deleteMessage(1001, 42); err != nil {
+		t.Fatalf("expected not-found delete to be ignored, got: %v", err)
 	}
 }
 

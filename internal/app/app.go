@@ -1566,12 +1566,13 @@ const (
 )
 
 const (
-	telegramFormatAlac   = "alac"
-	telegramFormatFlac   = "flac"
-	telegramFormatAac    = "aac"
-	telegramFormatAtmos  = "atmos"
-	transferModeOneByOne = "one"
-	transferModeZip      = "zip"
+	telegramFormatAlac      = "alac"
+	telegramFormatFlac      = "flac"
+	telegramFormatAac       = "aac"
+	telegramFormatAtmos     = "atmos"
+	transferModeOneByOne    = "one"
+	transferModeZip         = "zip"
+	downloadStatusTrackStep = 5
 )
 
 const (
@@ -5852,6 +5853,17 @@ func (b *TelegramBot) resolveCollectionTracksForSequential(session *DownloadSess
 	}
 }
 
+func shouldReportCollectionTrackProgress(index int, total int) bool {
+	if total <= 0 || index < 0 {
+		return false
+	}
+	completed := index + 1
+	if completed <= 1 || completed >= total {
+		return true
+	}
+	return completed%downloadStatusTrackStep == 0
+}
+
 func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, mediaType string, mediaID string, storefront string, status *DownloadStatus, progress func(phase string, done, total int64)) (bool, bool, error) {
 	if !shouldUseTelegramCollectionSequentialOneByOne(false, transferModeOneByOne, mediaType) {
 		return false, false, nil
@@ -5898,14 +5910,15 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 		}
 		track := &tracks[idx]
 		trackLabel := fmt.Sprintf("Track %d/%d", idx+1, totalTracks)
-		if status != nil {
+		reportTrackProgress := shouldReportCollectionTrackProgress(idx, totalTracks)
+		if status != nil && reportTrackProgress {
 			status.Update(trackLabel, int64(idx), int64(totalTracks))
 		}
 
 		trackID := strings.TrimSpace(track.ID)
 		if !forceRefresh && trackID != "" && b.trySendCachedTrack(chatID, replyToID, trackID, settings) {
 			sentAny = true
-			if status != nil {
+			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (cached)", int64(idx+1), int64(totalTracks))
 			}
 			continue
@@ -5936,7 +5949,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 
 		downloadedPaths := append([]string{}, session.LastDownloadedPaths...)
 		if len(downloadedPaths) == 0 {
-			if status != nil {
+			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (no output)", int64(idx+1), int64(totalTracks))
 			}
 			continue
@@ -5966,7 +5979,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 			filteredPaths = append(filteredPaths, trimmed)
 		}
 		if len(filteredPaths) == 0 {
-			if status != nil {
+			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (no upload path)", int64(idx+1), int64(totalTracks))
 			}
 			continue
@@ -5987,7 +6000,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 				sanitized := sanitizeTelegramError(err, b.token)
 				fmt.Printf("send file error (%s): %s\n", path, sanitized)
 				appendRuntimeErrorLogf("send file error (%s): %s", path, sanitized)
-				if status != nil {
+				if status != nil && reportTrackProgress {
 					status.Update(fmt.Sprintf("Failed to send %s: %v", filepath.Base(path), err), 0, 0)
 				}
 				continue
@@ -5999,7 +6012,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 				sentExtraPaths[path] = struct{}{}
 			}
 		}
-		if status != nil {
+		if status != nil && reportTrackProgress {
 			status.Update(trackLabel, int64(idx+1), int64(totalTracks))
 		}
 	}

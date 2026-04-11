@@ -20,7 +20,10 @@ import (
 	"time"
 )
 
-const downloadStatusErrorLogInterval = 30 * time.Second
+const (
+	downloadStatusErrorLogInterval = 30 * time.Second
+	downloadStatusMinEditInterval  = 30 * time.Second
+)
 
 func combineStreamingRequestError(reqErr error, writeErr error) error {
 	if reqErr == nil {
@@ -91,9 +94,10 @@ func newUploadWatchdog(parent context.Context, timeout time.Duration) (context.C
 }
 
 func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *DownloadStatus, phase string, onProgress func()) (int64, error) {
+	_ = status
+	_ = phase
 	buf := make([]byte, uploadProgressBufferSize)
 	var written int64
-	lastUpdate := time.Time{}
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
@@ -102,20 +106,6 @@ func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *D
 				written += int64(nw)
 				if onProgress != nil {
 					onProgress()
-				}
-				now := time.Now()
-				if status != nil {
-					if total > 0 {
-						if written >= total || lastUpdate.IsZero() || now.Sub(lastUpdate) >= 800*time.Millisecond {
-							status.Update(phase, written, total)
-							lastUpdate = now
-						}
-					} else {
-						if lastUpdate.IsZero() || now.Sub(lastUpdate) >= 800*time.Millisecond {
-							status.Update(phase, written, 0)
-							lastUpdate = now
-						}
-					}
 				}
 			}
 			if ew != nil {
@@ -126,13 +116,6 @@ func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *D
 			}
 		}
 		if er == io.EOF {
-			if status != nil {
-				if total > 0 {
-					status.Update(phase, total, total)
-				} else {
-					status.Update(phase, written, 0)
-				}
-			}
 			return written, nil
 		}
 		if er != nil {
@@ -897,6 +880,7 @@ type DownloadStatus struct {
 	chatID      int64
 	messageID   int
 	disabled    bool
+	muted       bool
 	lastPhase   string
 	lastPercent int
 	lastText    string
@@ -928,11 +912,12 @@ func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*Download
 	// 成功由调用方显式删除；失败再挂回 2 分钟自动删除。
 	bot.clearAutoDeleteMessage(chatID, messageID)
 	status := &DownloadStatus{
-		bot:       bot,
-		chatID:    chatID,
-		messageID: messageID,
-		updateCh:  make(chan struct{}, 1),
-		stopCh:    make(chan struct{}),
+		bot:        bot,
+		chatID:     chatID,
+		messageID:  messageID,
+		lastUpdate: time.Now(),
+		updateCh:   make(chan struct{}, 1),
+		stopCh:     make(chan struct{}),
 	}
 	go func() {
 		runWithRecovery("telegram download status loop", nil, func() {
@@ -972,10 +957,13 @@ func (s *DownloadStatus) finishSuccess() {
 	if s.disabled || s.messageID == 0 {
 		return
 	}
-	if err := s.bot.deleteMessage(s.chatID, s.messageID); err != nil {
-		// 删除失败时兜底挂回自动删除，避免长期残留。
-		s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
+	if !s.isMuted() {
+		if err := s.bot.editMessageTextBestEffort(s.chatID, s.messageID, "Completed.", nil); err == nil {
+			s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
+			return
+		}
 	}
+	s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
 }
 
 func (s *DownloadStatus) finishFailure() {
@@ -990,7 +978,7 @@ func (s *DownloadStatus) finishFailure() {
 }
 
 func (s *DownloadStatus) Update(phase string, done, total int64) {
-	if s == nil || s.bot == nil || s.disabled {
+	if s == nil || s.bot == nil || s.disabled || s.isMuted() {
 		return
 	}
 	s.mu.Lock()
@@ -1003,7 +991,7 @@ func (s *DownloadStatus) Update(phase string, done, total int64) {
 }
 
 func (s *DownloadStatus) UpdateSync(phase string, done, total int64) {
-	if s == nil || s.bot == nil || s.disabled {
+	if s == nil || s.bot == nil || s.disabled || s.isMuted() {
 		return
 	}
 	s.mu.Lock()
@@ -1039,7 +1027,7 @@ func (s *DownloadStatus) loop() {
 }
 
 func (s *DownloadStatus) flush(force bool) {
-	if s == nil || s.bot == nil || s.disabled {
+	if s == nil || s.bot == nil || s.disabled || s.isMuted() {
 		return
 	}
 	s.mu.Lock()
@@ -1051,8 +1039,6 @@ func (s *DownloadStatus) flush(force bool) {
 	done := s.latestDone
 	total := s.latestTotal
 	s.dirty = false
-	lastPhase := s.lastPhase
-	lastPercent := s.lastPercent
 	lastText := s.lastText
 	lastUpdate := s.lastUpdate
 	s.mu.Unlock()
@@ -1070,13 +1056,14 @@ func (s *DownloadStatus) flush(force bool) {
 
 	text := formatProgressText(phase, done, total, percent)
 	now := time.Now()
-	phaseChanged := phase != lastPhase
-	percentChanged := percent != lastPercent && percent >= 0
 	if !force {
 		if text == lastText {
 			return
 		}
-		if !phaseChanged && !percentChanged && now.Sub(lastUpdate) < 2*time.Second {
+		if !lastUpdate.IsZero() && now.Sub(lastUpdate) < downloadStatusMinEditInterval {
+			s.mu.Lock()
+			s.dirty = true
+			s.mu.Unlock()
 			return
 		}
 	}
@@ -1086,6 +1073,9 @@ func (s *DownloadStatus) flush(force bool) {
 			s.mu.Lock()
 			s.dirty = true
 			s.mu.Unlock()
+			return
+		}
+		if s.muteOnRateLimit(err) {
 			return
 		}
 		s.logUpdateError(err)
@@ -1121,6 +1111,41 @@ func (s *DownloadStatus) logUpdateError(err error) {
 	}
 	fmt.Printf("telegram status update failed chat=%d message=%d: %s\n", s.chatID, s.messageID, sanitized)
 	appendRuntimeErrorLogf("telegram status update failed chat=%d message=%d: %s", s.chatID, s.messageID, sanitized)
+}
+
+func (s *DownloadStatus) isMuted() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.muted
+}
+
+func (s *DownloadStatus) muteOnRateLimit(err error) bool {
+	if s == nil || s.bot == nil || err == nil {
+		return false
+	}
+	if _, ok := parseTelegramRetryAfter(err); !ok {
+		lower := strings.ToLower(err.Error())
+		if !(strings.Contains(lower, "429") && strings.Contains(lower, "too many requests")) {
+			return false
+		}
+	}
+	sanitized := sanitizeTelegramError(err, s.bot.token)
+	shouldLog := false
+	s.mu.Lock()
+	if !s.muted {
+		s.muted = true
+		shouldLog = true
+	}
+	s.dirty = false
+	s.mu.Unlock()
+	if shouldLog {
+		fmt.Printf("telegram status muted chat=%d message=%d due to rate limit: %s\n", s.chatID, s.messageID, sanitized)
+		appendRuntimeErrorLogf("telegram status muted chat=%d message=%d due to rate limit: %s", s.chatID, s.messageID, sanitized)
+	}
+	return true
 }
 
 func formatProgressText(phase string, done, total int64, percent int) string {

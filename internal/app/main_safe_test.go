@@ -1131,6 +1131,138 @@ func TestNewDownloadStatusFallsBackOnRateLimit(t *testing.T) {
 	}
 }
 
+func TestDownloadStatusFlushRespectsMinEditInterval(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+	status := &DownloadStatus{
+		bot:        bot,
+		chatID:     42,
+		messageID:  7,
+		lastUpdate: time.Now(),
+		updateCh:   make(chan struct{}, 1),
+		stopCh:     make(chan struct{}),
+	}
+
+	status.Update("Downloading", 1, 10)
+	status.flush(false)
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected no edit during hard cooldown, got %d", got)
+	}
+	status.mu.Lock()
+	dirty := status.dirty
+	status.mu.Unlock()
+	if !dirty {
+		t.Fatalf("expected status to remain dirty after cooldown deferral")
+	}
+}
+
+func TestDownloadStatusMutesAfterEditRateLimit(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5","parameters":{"retry_after":5}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+	status := &DownloadStatus{
+		bot:        bot,
+		chatID:     42,
+		messageID:  7,
+		lastUpdate: time.Now().Add(-downloadStatusMinEditInterval),
+		updateCh:   make(chan struct{}, 1),
+		stopCh:     make(chan struct{}),
+	}
+
+	status.Update("Downloading", 1, 10)
+	status.flush(false)
+	if !status.isMuted() {
+		t.Fatalf("expected status to mute after edit rate limit")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected one edit attempt before mute, got %d", got)
+	}
+
+	status.Update("Still downloading", 2, 10)
+	status.flush(false)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected no further edit attempts after mute, got %d", got)
+	}
+}
+
+func TestDownloadStatusFinishSuccessSchedulesAutoDelete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/editMessageText") {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	b := &TelegramBot{
+		token:              "test-token",
+		apiBase:            server.URL,
+		client:             server.Client(),
+		autoDeleteMessages: make(map[string]*time.Timer),
+		autoDeleteSticky:   make(map[string]bool),
+		autoDeleteDeadline: make(map[string]time.Time),
+	}
+	status := &DownloadStatus{
+		bot:       b,
+		chatID:    1001,
+		messageID: 42,
+		stopCh:    make(chan struct{}),
+	}
+	status.finishSuccess()
+	key := autoDeleteKey(1001, 42)
+	defer b.clearAutoDeleteMessage(1001, 42)
+	b.autoDeleteMu.Lock()
+	_, exists := b.autoDeleteMessages[key]
+	b.autoDeleteMu.Unlock()
+	if !exists {
+		t.Fatalf("expected success status to schedule auto-delete")
+	}
+}
+
+func TestShouldReportCollectionTrackProgress(t *testing.T) {
+	tests := []struct {
+		index int
+		total int
+		want  bool
+	}{
+		{index: 0, total: 12, want: true},
+		{index: 1, total: 12, want: false},
+		{index: 4, total: 12, want: true},
+		{index: 9, total: 12, want: true},
+		{index: 10, total: 12, want: false},
+		{index: 11, total: 12, want: true},
+	}
+	for _, tc := range tests {
+		if got := shouldReportCollectionTrackProgress(tc.index, tc.total); got != tc.want {
+			t.Fatalf("index=%d total=%d want=%t got=%t", tc.index, tc.total, tc.want, got)
+		}
+	}
+}
+
 func TestRunDownloadContinuesWithoutStatusMessageOnRateLimit(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

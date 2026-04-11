@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -684,6 +685,34 @@ func TestTelegramDailyRestartEnabledDefaultsAndOverride(t *testing.T) {
 	Config.TelegramDailyRestartEnabled = &enabled
 	if !telegramDailyRestartEnabled() {
 		t.Fatalf("expected daily restart enabled when configured true")
+	}
+}
+
+func TestGetUpdatesBackoffUsesRetryAfter(t *testing.T) {
+	b := &TelegramBot{
+		getUpdatesErrorDelay:    2 * time.Second,
+		getUpdatesConflictDelay: 5 * time.Second,
+	}
+	backoff, reason := b.getUpdatesBackoff(errors.New(`getUpdates failed: 429 Too Many Requests (Too Many Requests: retry after 5)`))
+	if reason != "retry_after" {
+		t.Fatalf("expected retry_after reason, got %q", reason)
+	}
+	if backoff != 5*time.Second {
+		t.Fatalf("expected 5s backoff, got %s", backoff)
+	}
+}
+
+func TestGetUpdatesBackoffUsesConflictDelay(t *testing.T) {
+	b := &TelegramBot{
+		getUpdatesErrorDelay:    2 * time.Second,
+		getUpdatesConflictDelay: 5 * time.Second,
+	}
+	backoff, reason := b.getUpdatesBackoff(errors.New(`getUpdates failed: 409 Conflict (terminated by other getUpdates request)`))
+	if reason != "conflict" {
+		t.Fatalf("expected conflict reason, got %q", reason)
+	}
+	if backoff != 5*time.Second {
+		t.Fatalf("expected conflict backoff 5s, got %s", backoff)
 	}
 }
 

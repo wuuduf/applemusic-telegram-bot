@@ -1096,6 +1096,38 @@ func TestEditMessageTextRespectsLimiterWait(t *testing.T) {
 	}
 }
 
+func TestEditMessageTextBestEffortDeferredByLimiter(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	limiter := newTelegramSendLimiter(time.Hour, 0)
+	if limiter == nil {
+		t.Fatalf("expected limiter")
+	}
+	limiter.lastAll = time.Now()
+
+	bot := &TelegramBot{
+		token:       "test-token",
+		apiBase:     server.URL,
+		client:      server.Client(),
+		sendLimiter: limiter,
+		shutdownCtx: context.Background(),
+	}
+
+	err := bot.editMessageTextBestEffort(42, 7, "hello", nil)
+	if !errors.Is(err, errTelegramSendDeferred) {
+		t.Fatalf("expected deferred send error, got %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected no HTTP request when best-effort edit is deferred, got %d", got)
+	}
+}
+
 func TestHandleTrackReuseStageRecordsSourceFormatWhenConversionFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	trackPath := filepath.Join(tmpDir, "song.m4a")

@@ -44,27 +44,28 @@ import (
 )
 
 var (
-	forbiddenNames       = regexp.MustCompile(`[/\\<>:"|?*]`)
-	retryAfterJSONRe     = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
-	retryAfterTextRe     = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
-	mediaIDNumericRe     = regexp.MustCompile(`^\d+$`)
-	mediaIDPlaylistRe    = regexp.MustCompile(`^pl\.[A-Za-z0-9-]+$`)
-	mediaIDStationRe     = regexp.MustCompile(`^ra\.[A-Za-z0-9-]+$`)
-	mediaIDGenericRe     = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	artist_select        bool
-	debug_mode           bool
-	alac_max             *int
-	atmos_max            *int
-	mv_max               *int
-	mv_audio_type        *string
-	aac_type             *string
-	Config               structs.ConfigSet
-	searchMetaMu         sync.Mutex
-	searchMetaByID       = make(map[string]AudioMeta)
-	networkHTTPClient    = &http.Client{Timeout: 45 * time.Second}
-	runtimeErrorLogMu    sync.Mutex
-	runtimeErrorLogPath  atomic.Value
-	errNoFilesDownloaded = errors.New("no files were downloaded")
+	forbiddenNames          = regexp.MustCompile(`[/\\<>:"|?*]`)
+	retryAfterJSONRe        = regexp.MustCompile(`(?i)"retry_after"\s*:\s*(\d+)`)
+	retryAfterTextRe        = regexp.MustCompile(`(?i)retry\s+after\s+(\d+)`)
+	mediaIDNumericRe        = regexp.MustCompile(`^\d+$`)
+	mediaIDPlaylistRe       = regexp.MustCompile(`^pl\.[A-Za-z0-9-]+$`)
+	mediaIDStationRe        = regexp.MustCompile(`^ra\.[A-Za-z0-9-]+$`)
+	mediaIDGenericRe        = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	artist_select           bool
+	debug_mode              bool
+	alac_max                *int
+	atmos_max               *int
+	mv_max                  *int
+	mv_audio_type           *string
+	aac_type                *string
+	Config                  structs.ConfigSet
+	searchMetaMu            sync.Mutex
+	searchMetaByID          = make(map[string]AudioMeta)
+	networkHTTPClient       = &http.Client{Timeout: 45 * time.Second}
+	runtimeErrorLogMu       sync.Mutex
+	runtimeErrorLogPath     atomic.Value
+	errNoFilesDownloaded    = errors.New("no files were downloaded")
+	errTelegramSendDeferred = errors.New("telegram send deferred by limiter")
 )
 
 const maxMediaIDLength = 128
@@ -2370,6 +2371,25 @@ func (l *telegramSendLimiter) reserve(chatID int64) time.Duration {
 	return wait
 }
 
+func (l *telegramSendLimiter) tryReserve(chatID int64) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.nowFn()
+	if l.nextWaitLocked(now, chatID) > 0 {
+		return false
+	}
+	if l.globalInterval > 0 {
+		l.lastAll = now
+	}
+	if chatID != 0 && l.chatInterval > 0 {
+		l.lastChat[chatID] = now
+	}
+	return true
+}
+
 func (l *telegramSendLimiter) nextWait(chatID int64) time.Duration {
 	if l == nil {
 		return 0
@@ -2566,16 +2586,22 @@ func (b *TelegramBot) loop() {
 				appendRuntimeErrorLogf("getUpdates hit %d consecutive errors; restarting bot runtime", consecutiveErrors)
 				return
 			}
-			lower := strings.ToLower(msg)
-			if strings.Contains(lower, "409") || strings.Contains(lower, "conflict") {
+			backoff, reason := b.getUpdatesBackoff(err)
+			if reason == "conflict" {
 				if lastConflictHint.IsZero() || time.Since(lastConflictHint) > 30*time.Second {
 					fmt.Println("Hint: 409 Conflict means another getUpdates consumer is active (another bot process) or webhook is set. Keep only one bot instance and clear webhook if needed.")
 					lastConflictHint = time.Now()
 				}
-				time.Sleep(b.getUpdatesConflictSleep())
-				continue
+			} else if reason == "retry_after" {
+				fmt.Printf("getUpdates rate limited, retry after %s\n", backoff.Round(time.Second))
+				appendRuntimeErrorLogf("getUpdates rate limited; retry after %s", backoff.Round(time.Second))
 			}
-			time.Sleep(b.getUpdatesErrorSleep())
+			if backoff <= 0 {
+				backoff = b.getUpdatesErrorSleep()
+			}
+			if err := sleepWithContext(b.shutdownContext(), backoff); err != nil {
+				return
+			}
 			continue
 		}
 		consecutiveErrors = 0
@@ -5085,7 +5111,18 @@ func (b *TelegramBot) waitTelegramSend(ctx context.Context, chatID int64) error 
 	if b == nil || b.sendLimiter == nil {
 		return nil
 	}
-	return b.sendLimiter.wait(ctx, chatID)
+	err := b.sendLimiter.wait(ctx, chatID)
+	if err != nil {
+		fmt.Printf("telegram send wait canceled chat=%d: %v\n", chatID, err)
+	}
+	return err
+}
+
+func (b *TelegramBot) tryTelegramSend(chatID int64) bool {
+	if b == nil || b.sendLimiter == nil {
+		return true
+	}
+	return b.sendLimiter.tryReserve(chatID)
 }
 
 func (b *TelegramBot) operationContext() context.Context {
@@ -5115,6 +5152,7 @@ func (b *TelegramBot) applyTelegramRetryAfter(duration time.Duration) {
 	if b.sendLimiter != nil {
 		b.sendLimiter.blockFor(duration)
 	}
+	fmt.Printf("telegram retry_after applied: blocking sends for %s\n", duration.Round(time.Second))
 	appRuntimeMetrics.recordTelegramRetryAfter()
 }
 
@@ -5130,6 +5168,23 @@ func (b *TelegramBot) noteTelegramRateLimit(err error) {
 		retryAfter = time.Second
 	}
 	b.applyTelegramRetryAfter(retryAfter)
+}
+
+func (b *TelegramBot) getUpdatesBackoff(err error) (time.Duration, string) {
+	if err == nil {
+		return 0, ""
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "409") || strings.Contains(msg, "conflict") {
+		return b.getUpdatesConflictSleep(), "conflict"
+	}
+	if retryAfter, ok := parseTelegramRetryAfter(err); ok {
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return retryAfter, "retry_after"
+	}
+	return b.getUpdatesErrorSleep(), "default"
 }
 
 func (b *TelegramBot) queueDownloadSong(chatID int64, songID string) {
@@ -5951,17 +6006,22 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 
 func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession) error, single bool, forceRefresh bool, replyToID int, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string) {
 	var status *DownloadStatus
+	startedAt := time.Now()
+	taskResult := "unknown"
+	fmt.Printf("telegram task start chat=%d media=%s:%s storefront=%s transfer=%s single=%t refresh=%t\n", chatID, mediaType, mediaID, storefront, transferMode, single, forceRefresh)
 	defer func() {
 		if rec := recover(); rec != nil {
+			taskResult = "panic"
 			scope := fmt.Sprintf("telegram runDownload chat=%d media=%s:%s", chatID, mediaType, mediaID)
 			_ = logRecoveredPanic(scope, rec)
 			if status != nil {
 				status.UpdateSync("任务异常已记录，已自动跳过当前任务。", 0, 0)
 				status.Stop()
-				return
+			} else {
+				_ = b.sendMessageWithReply(chatID, "任务异常已记录，已自动跳过当前任务。", nil, replyToID)
 			}
-			_ = b.sendMessageWithReply(chatID, "任务异常已记录，已自动跳过当前任务。", nil, replyToID)
 		}
+		fmt.Printf("telegram task end chat=%d media=%s:%s result=%s elapsed=%s\n", chatID, mediaType, mediaID, taskResult, time.Since(startedAt).Round(time.Millisecond))
 	}()
 
 	settings = normalizeChatSettings(settings)
@@ -5970,6 +6030,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 	var err error
 	status, err = newDownloadStatus(b, chatID, replyToID)
 	if err != nil {
+		taskResult = fmt.Sprintf("status-create-failed: %v", err)
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to create status message: %v", err), nil, replyToID)
 		return
 	}
@@ -5989,15 +6050,20 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		if handled {
 			if seqErr != nil {
 				if errors.Is(seqErr, errNoFilesDownloaded) {
+					taskResult = "no-files(seq)"
 					status.UpdateSync("No files were downloaded.", 0, 0)
 					return
 				}
+				taskResult = fmt.Sprintf("failed(seq): %s", sanitizeTelegramError(seqErr, b.token))
 				status.UpdateSync(fmt.Sprintf("Failed: %v", seqErr), 0, 0)
 				return
 			}
 			if sentAny {
+				taskResult = "success(seq)"
 				completed = true
 				status.finishSuccess()
+			} else {
+				taskResult = "no-upload-success(seq)"
 			}
 			return
 		}
@@ -6029,13 +6095,16 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum || mediaType == mediaTypeArtistSongs {
 			paths = b.augmentDownloadedPaths(paths, settings)
 		}
+		fmt.Printf("telegram task ready chat=%d media=%s:%s primary=%d total=%d transfer=%s\n", chatID, mediaType, mediaID, primaryCount, len(paths), transferMode)
 		return nil
 	}()
 	if coreErr != nil {
 		if errors.Is(coreErr, errNoFilesDownloaded) {
+			taskResult = "no-files"
 			status.UpdateSync("No files were downloaded.", 0, 0)
 			return
 		}
+		taskResult = fmt.Sprintf("failed: %s", sanitizeTelegramError(coreErr, b.token))
 		status.UpdateSync(fmt.Sprintf("Failed: %v", coreErr), 0, 0)
 		return
 	}
@@ -6053,6 +6122,7 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		}
 		zipPath, displayName, err := createZipFromPaths(paths)
 		if err != nil {
+			taskResult = fmt.Sprintf("zip-create-failed: %v", err)
 			status.UpdateSync(fmt.Sprintf("Failed to create ZIP: %v", err), 0, 0)
 			return
 		}
@@ -6066,12 +6136,15 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 			fmt.Println("send ZIP error:", sanitized)
 			appendRuntimeErrorLogf("send ZIP error (%s:%s): %s", mediaType, mediaID, sanitized)
 			if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
+				fmt.Printf("telegram zip fallback chat=%d media=%s:%s reason=%s\n", chatID, mediaType, mediaID, sanitized)
 				status.UpdateSync("ZIP exceeds Telegram limit, fallback to one-by-one transfer.", 0, 0)
 			} else {
+				taskResult = fmt.Sprintf("zip-send-failed: %s", sanitized)
 				status.UpdateSync(fmt.Sprintf("Failed to send ZIP: %v", err), 0, 0)
 				return
 			}
 		} else {
+			taskResult = "success(zip)"
 			completed = true
 			status.finishSuccess()
 			return
@@ -6093,8 +6166,11 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		sentAny = true
 	}
 	if sentAny {
+		taskResult = "success"
 		completed = true
 		status.finishSuccess()
+	} else if taskResult == "unknown" {
+		taskResult = "no-upload-success"
 	}
 }
 
@@ -6493,12 +6569,26 @@ func (b *TelegramBot) answerInlineQuery(inlineQueryID string, results any, perso
 }
 
 func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, markup any) error {
+	return b.editMessageTextWithMode(chatID, messageID, text, markup, false)
+}
+
+func (b *TelegramBot) editMessageTextBestEffort(chatID int64, messageID int, text string, markup any) error {
+	return b.editMessageTextWithMode(chatID, messageID, text, markup, true)
+}
+
+func (b *TelegramBot) editMessageTextWithMode(chatID int64, messageID int, text string, markup any, bestEffort bool) error {
 	if messageID == 0 {
 		return nil
 	}
 	ctx := b.operationContext()
-	if err := b.waitTelegramSend(ctx, chatID); err != nil {
-		return err
+	if bestEffort {
+		if !b.tryTelegramSend(chatID) {
+			return errTelegramSendDeferred
+		}
+	} else {
+		if err := b.waitTelegramSend(ctx, chatID); err != nil {
+			return err
+		}
 	}
 	text = b.localizeOutgoingText(chatID, text)
 	payload := map[string]any{

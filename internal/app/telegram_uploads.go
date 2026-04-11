@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+const downloadStatusErrorLogInterval = 30 * time.Second
 
 func combineStreamingRequestError(reqErr error, writeErr error) error {
 	if reqErr == nil {
@@ -162,41 +165,58 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 	if ctx == nil {
 		ctx = b.operationContext()
 	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "Telegram send"
+	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
+			fmt.Printf("%s canceled before attempt %d/%d: %v\n", label, attempt, maxAttempts, err)
 			return err
 		}
 		lastErr = fn()
 		if lastErr == nil {
+			if attempt > 1 {
+				fmt.Printf("%s succeeded on retry %d/%d\n", label, attempt, maxAttempts)
+			}
 			return nil
 		}
+		sanitized := sanitizeTelegramError(lastErr, b.token)
 		retryAfter, hasRetryAfter := parseTelegramRetryAfter(lastErr)
 		if hasRetryAfter {
 			b.applyTelegramRetryAfter(retryAfter)
+			fmt.Printf("%s attempt %d/%d hit retry_after=%s: %s\n", label, attempt, maxAttempts, retryAfter.Round(time.Second), sanitized)
+		} else {
+			fmt.Printf("%s attempt %d/%d failed: %s\n", label, attempt, maxAttempts, sanitized)
 		}
 		if attempt == maxAttempts || (!isRetryableUploadError(lastErr) && !hasRetryAfter) {
 			b.noteTelegramRateLimit(lastErr)
+			fmt.Printf("%s giving up after attempt %d/%d: %s\n", label, attempt, maxAttempts, sanitized)
 			return lastErr
 		}
 		if status != nil {
 			phase := fmt.Sprintf("Upload interrupted, retrying (%d/%d)", attempt+1, maxAttempts)
-			if strings.TrimSpace(label) != "" {
-				phase = fmt.Sprintf("%s interrupted, retrying (%d/%d)", label, attempt+1, maxAttempts)
-			}
 			if hasRetryAfter {
-				phase = fmt.Sprintf("%s rate limited, retry after %ds (%d/%d)", strings.TrimSpace(label), int(retryAfter.Seconds()), attempt+1, maxAttempts)
+				phase = fmt.Sprintf("%s rate limited, retry after %ds (%d/%d)", label, int(retryAfter.Seconds()), attempt+1, maxAttempts)
+			} else {
+				phase = fmt.Sprintf("%s interrupted, retrying (%d/%d)", label, attempt+1, maxAttempts)
 			}
 			status.Update(phase, 0, 0)
 		}
 		closeHTTPIdleConnections(b.client)
 		closeHTTPIdleConnections(b.pollClient)
 		if hasRetryAfter {
+			fmt.Printf("%s waiting %s before retry %d/%d\n", label, retryAfter.Round(time.Second), attempt+1, maxAttempts)
 			if err := sleepWithContext(ctx, retryAfter); err != nil {
+				fmt.Printf("%s retry wait canceled: %v\n", label, err)
 				return err
 			}
 		} else {
-			if err := sleepWithContext(ctx, time.Duration(attempt)*time.Second); err != nil {
+			wait := time.Duration(attempt) * time.Second
+			fmt.Printf("%s waiting %s before retry %d/%d\n", label, wait, attempt+1, maxAttempts)
+			if err := sleepWithContext(ctx, wait); err != nil {
+				fmt.Printf("%s retry wait canceled: %v\n", label, err)
 				return err
 			}
 		}
@@ -205,6 +225,12 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 }
 
 func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
+	startedAt := time.Now()
+	sizeLabel := "unknown"
+	if info, err := os.Stat(filePath); err == nil && info != nil {
+		sizeLabel = formatBytes(info.Size())
+	}
+	fmt.Printf("telegram send file start chat=%d path=%s size=%s\n", chatID, filePath, sizeLabel)
 	var finalErr error
 	uploadCtx := b.uploadContext(session)
 	ext := strings.ToLower(filepath.Ext(filePath))
@@ -239,8 +265,10 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 	}
 	if finalErr != nil {
 		appRuntimeMetrics.recordUploadFailure()
+		fmt.Printf("telegram send file failed chat=%d path=%s elapsed=%s err=%s\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond), sanitizeTelegramError(finalErr, b.token))
 	} else {
 		appRuntimeMetrics.recordUploadSuccess()
+		fmt.Printf("telegram send file finished chat=%d path=%s elapsed=%s\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond))
 	}
 	return finalErr
 }
@@ -877,6 +905,8 @@ type DownloadStatus struct {
 	latestDone  int64
 	latestTotal int64
 	dirty       bool
+	lastErrText string
+	lastErrLog  time.Time
 	updateCh    chan struct{}
 	stopCh      chan struct{}
 	stopOnce    sync.Once
@@ -1025,7 +1055,14 @@ func (s *DownloadStatus) flush(force bool) {
 		}
 	}
 
-	if err := s.bot.editMessageText(s.chatID, s.messageID, text, nil); err != nil {
+	if err := s.bot.editMessageTextBestEffort(s.chatID, s.messageID, text, nil); err != nil {
+		if errors.Is(err, errTelegramSendDeferred) {
+			s.mu.Lock()
+			s.dirty = true
+			s.mu.Unlock()
+			return
+		}
+		s.logUpdateError(err)
 		s.mu.Lock()
 		s.dirty = true
 		s.mu.Unlock()
@@ -1037,6 +1074,27 @@ func (s *DownloadStatus) flush(force bool) {
 	s.lastText = text
 	s.lastUpdate = now
 	s.mu.Unlock()
+}
+
+func (s *DownloadStatus) logUpdateError(err error) {
+	if s == nil || s.bot == nil || err == nil {
+		return
+	}
+	now := time.Now()
+	sanitized := sanitizeTelegramError(err, s.bot.token)
+	shouldLog := false
+	s.mu.Lock()
+	if sanitized != s.lastErrText || now.Sub(s.lastErrLog) >= downloadStatusErrorLogInterval {
+		s.lastErrText = sanitized
+		s.lastErrLog = now
+		shouldLog = true
+	}
+	s.mu.Unlock()
+	if !shouldLog {
+		return
+	}
+	fmt.Printf("telegram status update failed chat=%d message=%d: %s\n", s.chatID, s.messageID, sanitized)
+	appendRuntimeErrorLogf("telegram status update failed chat=%d message=%d: %s", s.chatID, s.messageID, sanitized)
 }
 
 func formatProgressText(phase string, done, total int64, percent int) string {

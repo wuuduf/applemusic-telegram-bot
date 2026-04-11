@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	sharedcatalog "github.com/wuuduf/applemusic-telegram-bot/internal/catalog"
 	apputils "github.com/wuuduf/applemusic-telegram-bot/utils"
@@ -116,6 +117,83 @@ func TestShouldUseTelegramCollectionSequentialOneByOne(t *testing.T) {
 		if got != tt.want {
 			t.Fatalf("%s: got=%v want=%v", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestResolveStorefrontPrefersConfigOverURL(t *testing.T) {
+	original := Config.Storefront
+	t.Cleanup(func() {
+		Config.Storefront = original
+	})
+
+	Config.Storefront = "cn"
+	if got := resolveStorefront(&AppleURLTarget{Storefront: "us"}); got != "cn" {
+		t.Fatalf("expected config storefront first, got %q", got)
+	}
+
+	Config.Storefront = ""
+	if got := resolveStorefront(&AppleURLTarget{Storefront: "us"}); got != "us" {
+		t.Fatalf("expected target storefront fallback, got %q", got)
+	}
+
+	if got := resolveStorefront(&AppleURLTarget{}); got != "us" {
+		t.Fatalf("expected default us fallback, got %q", got)
+	}
+}
+
+func TestHandleURLTargetWithOptionsUsesConfigStorefront(t *testing.T) {
+	original := Config.Storefront
+	t.Cleanup(func() {
+		Config.Storefront = original
+	})
+	Config.Storefront = "cn"
+
+	bot := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 2),
+		workerLimit:       1,
+		chatSettings:      make(map[int64]ChatDownloadSettings),
+		inflightDownloads: make(map[string]struct{}),
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+
+	bot.handleURLTargetWithOptions(42, 7, &AppleURLTarget{
+		MediaType:  mediaTypeSong,
+		ID:         "12345",
+		Storefront: "us",
+	}, false)
+
+	if len(bot.downloadQueue) != 1 {
+		t.Fatalf("expected queued request")
+	}
+	req := <-bot.downloadQueue
+	if req == nil {
+		t.Fatalf("expected non-nil request")
+	}
+	if req.storefront != "cn" {
+		t.Fatalf("expected config storefront cn, got %q", req.storefront)
+	}
+}
+
+func TestLimitStringWithConfigHonorsRuneAndByteLimits(t *testing.T) {
+	cfg := &structs.ConfigSet{LimitMax: 200}
+	input := strings.Repeat("阿", 120) // 360 bytes
+	got := LimitStringWithConfig(cfg, input)
+	if !utf8.ValidString(got) {
+		t.Fatalf("expected valid utf-8, got invalid string")
+	}
+	if len([]byte(got)) > maxTemplateValueBytes {
+		t.Fatalf("expected byte length <= %d, got %d", maxTemplateValueBytes, len([]byte(got)))
+	}
+	if len([]rune(got)) >= len([]rune(input)) {
+		t.Fatalf("expected truncation, got runes=%d input=%d", len([]rune(got)), len([]rune(input)))
+	}
+}
+
+func TestLimitStringWithConfigHonorsConfigRuneLimit(t *testing.T) {
+	cfg := &structs.ConfigSet{LimitMax: 5}
+	got := LimitStringWithConfig(cfg, "abcdef")
+	if got != "abcde" {
+		t.Fatalf("unexpected truncate result: %q", got)
 	}
 }
 

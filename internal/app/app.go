@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	sharedcatalog "github.com/wuuduf/applemusic-telegram-bot/internal/catalog"
 	sharedstorage "github.com/wuuduf/applemusic-telegram-bot/internal/storage"
@@ -69,6 +70,7 @@ var (
 )
 
 const maxMediaIDLength = 128
+const maxTemplateValueBytes = 240
 
 type AudioMeta struct {
 	TrackID        string
@@ -402,10 +404,31 @@ func LimitStringWithConfig(cfg *structs.ConfigSet, s string) string {
 	if cfg == nil {
 		return s
 	}
-	if len([]rune(s)) > cfg.LimitMax {
-		return string([]rune(s)[:cfg.LimitMax])
+	if cfg.LimitMax > 0 && len([]rune(s)) > cfg.LimitMax {
+		s = string([]rune(s)[:cfg.LimitMax])
 	}
-	return s
+	return truncateUTF8ByBytes(s, maxTemplateValueBytes)
+}
+
+func truncateUTF8ByBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(maxBytes)
+	used := 0
+	for _, r := range s {
+		size := utf8.RuneLen(r)
+		if size <= 0 {
+			size = 1
+		}
+		if used+size > maxBytes {
+			break
+		}
+		b.WriteRune(r)
+		used += size
+	}
+	return b.String()
 }
 
 func isInArray(arr []int, target int) bool {
@@ -3369,7 +3392,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 			_ = b.sendMessageWithReply(chatID, "artistphoto only supports artist URL/ID.", nil, replyToID)
 			return
 		}
-		b.promptMediaTransfer(chatID, mediaTypeArtistAsset, target.ID, target.Storefront, "", replyToID, false)
+		b.promptMediaTransfer(chatID, mediaTypeArtistAsset, target.ID, resolveStorefront(target), "", replyToID, false)
 	case "cover":
 		target, err := resolveCommandTarget(args, "")
 		if err != nil {
@@ -3401,7 +3424,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 		case mediaTypeSong:
 			b.enqueueSongLyricsTask(chatID, replyToID, target)
 		case mediaTypeAlbum:
-			b.promptMediaTransfer(chatID, mediaTypeAlbumLyrics, target.ID, target.Storefront, "", replyToID, false)
+			b.promptMediaTransfer(chatID, mediaTypeAlbumLyrics, target.ID, resolveStorefront(target), "", replyToID, false)
 		default:
 			_ = b.sendMessageWithReply(chatID, "lyrics command supports song/album only.", nil, replyToID)
 		}
@@ -3641,27 +3664,24 @@ func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, ta
 		_ = b.sendMessageWithReply(chatID, "Invalid Apple Music URL.", nil, replyToID)
 		return
 	}
+	storefront := resolveStorefront(target)
 	switch target.MediaType {
 	case mediaTypeSong:
-		b.queueDownloadSongWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
+		b.queueDownloadSongWithStorefrontOptions(chatID, target.ID, storefront, replyToID, forceRefresh)
 	case mediaTypeAlbum:
-		b.queueDownloadAlbumWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
+		b.queueDownloadAlbumWithStorefrontOptions(chatID, target.ID, storefront, replyToID, forceRefresh)
 	case mediaTypePlaylist:
-		b.queueDownloadPlaylistWithStorefrontOptions(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
+		b.queueDownloadPlaylistWithStorefrontOptions(chatID, target.ID, storefront, replyToID, forceRefresh)
 	case mediaTypeStation:
-		b.queueDownloadStationWithStorefront(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
+		b.queueDownloadStationWithStorefront(chatID, target.ID, storefront, replyToID, forceRefresh)
 	case mediaTypeMusicVideo:
-		b.queueDownloadMusicVideoWithStorefront(chatID, target.ID, target.Storefront, replyToID, forceRefresh)
+		b.queueDownloadMusicVideoWithStorefront(chatID, target.ID, storefront, replyToID, forceRefresh)
 	case mediaTypeArtist:
 		artistName := ""
 		if target.RawURL != "" {
 			if name, _, err := getUrlArtistName(target.RawURL, b.appleToken); err == nil {
 				artistName = name
 			}
-		}
-		storefront := target.Storefront
-		if storefront == "" {
-			storefront = Config.Storefront
 		}
 		b.startArtistSelection(chatID, target.ID, artistName, storefront, replyToID)
 	default:
@@ -3756,7 +3776,7 @@ func normalizeAppleURLTarget(target *AppleURLTarget) (*AppleURLTarget, error) {
 	}
 	return &AppleURLTarget{
 		MediaType:  mediaType,
-		Storefront: strings.TrimSpace(target.Storefront),
+		Storefront: resolveStorefront(target),
 		ID:         mediaID,
 		RawURL:     strings.TrimSpace(target.RawURL),
 	}, nil
@@ -3899,14 +3919,14 @@ func sanitizeFileBaseName(name string) string {
 }
 
 func resolveStorefront(target *AppleURLTarget) string {
-	if target != nil && strings.TrimSpace(target.Storefront) != "" {
-		return target.Storefront
-	}
 	storefront := strings.TrimSpace(Config.Storefront)
-	if storefront == "" {
-		storefront = "us"
+	if storefront != "" {
+		return storefront
 	}
-	return storefront
+	if target != nil && strings.TrimSpace(target.Storefront) != "" {
+		return strings.TrimSpace(target.Storefront)
+	}
+	return "us"
 }
 
 func firstNonEmpty(values ...string) string {
@@ -5649,10 +5669,32 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 		_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 		return false
 	}
+	waitingRequests := b.queuedRequestCount()
 	if queueLen > 0 || activeWorkers >= workerLimit {
-		_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", queueLen+1, activeWorkers, workerLimit), nil, req.replyToID)
+		if waitingRequests <= 0 {
+			waitingRequests = 1
+		}
+		_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", waitingRequests, activeWorkers, workerLimit), nil, req.replyToID)
 	}
 	return true
+}
+
+func (b *TelegramBot) queuedRequestCount() int {
+	if b == nil {
+		return 0
+	}
+	b.requestStateMu.Lock()
+	defer b.requestStateMu.Unlock()
+	if len(b.activeRequests) == 0 {
+		return 0
+	}
+	count := 0
+	for _, request := range b.activeRequests {
+		if strings.TrimSpace(request.State) != "running" {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *TelegramBot) enqueueDownload(chatID int64, replyToID int, single bool, forceRefresh bool, settings ChatDownloadSettings, transferMode string, mediaType string, mediaID string, storefront string, inflightKey string, fn func(session *DownloadSession) error) bool {

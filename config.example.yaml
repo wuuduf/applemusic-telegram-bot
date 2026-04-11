@@ -81,6 +81,6 @@ telegram-min-free-disk-mb: 512    # Minimum free space required on download root
 telegram-min-free-tmp-mb: 256     # Minimum free space required on temp directory before accepting new tasks
 telegram-max-memory-mb: 0         # Optional memory guard (0 = disabled, fallback to max-memory-limit/env if set)
 telegram-download-max-gb: 3        # Cleanup quota for Telegram download folders
-telegram-cleanup-interval-sec: 300  # Periodic janitor interval (incremental cleanup, no per-task full scan)
-telegram-cleanup-scan-interval-sec: 1800 # Full scan fallback interval to heal drift
+telegram-cleanup-interval-sec: 300  # Periodic janitor interval
+telegram-cleanup-scan-interval-sec: 1800 # Full scan interval (enabled by default; set AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN=0 to disable)
 telegram-cleanup-protect-sec: 120   # New files younger than this are protected from janitor deletion

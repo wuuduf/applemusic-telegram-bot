@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,10 +150,32 @@ func TestTelegramCleanupTrackerJanitor(t *testing.T) {
 	t.Fatalf("expected janitor to evict old file after startup scan, scanRuns=%d", scanRuns)
 }
 
-func TestTelegramCleanupScanIntervalDisabledByDefault(t *testing.T) {
+func TestTelegramCleanupStartRunsImmediateScan(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	tracker := newTelegramCleanupTracker([]sharedstorage.CleanupRoot{{Owner: sharedstorage.OwnerTelegram, Mode: sharedstorage.ModeDownload, Path: root}}, "", 1024, time.Hour, time.Hour, 0)
+	var scanCalls atomic.Int32
+	tracker.scanFolder = func(root string, cacheFile string) (int64, []downloadFileEntry, error) {
+		scanCalls.Add(1)
+		return 0, nil, nil
+	}
+	tracker.start()
+	defer tracker.stop()
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if scanCalls.Load() > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected startup scan to run immediately")
+}
+
+func TestTelegramCleanupScanIntervalEnabledByDefault(t *testing.T) {
 	t.Setenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN", "")
-	if got := telegramCleanupScanInterval(); got != 0 {
-		t.Fatalf("expected scan interval to be disabled by default, got %s", got)
+	if got := telegramCleanupScanInterval(); got <= 0 {
+		t.Fatalf("expected scan interval to be enabled by default, got %s", got)
 	}
 }
 
@@ -160,5 +183,12 @@ func TestTelegramCleanupScanIntervalCanBeEnabledByEnv(t *testing.T) {
 	t.Setenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN", "1")
 	if got := telegramCleanupScanInterval(); got <= 0 {
 		t.Fatalf("expected scan interval to be enabled with env, got %s", got)
+	}
+}
+
+func TestTelegramCleanupScanIntervalCanBeDisabledByEnv(t *testing.T) {
+	t.Setenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN", "0")
+	if got := telegramCleanupScanInterval(); got != 0 {
+		t.Fatalf("expected scan interval to be disabled by env, got %s", got)
 	}
 }

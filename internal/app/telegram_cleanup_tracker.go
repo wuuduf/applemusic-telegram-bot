@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,10 +64,12 @@ func telegramCleanupScanInterval() time.Duration {
 		sec = int(defaultTelegramCleanupScanInterval / time.Second)
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AMDL_TELEGRAM_CLEANUP_ENABLE_SCAN"))) {
+	case "0", "false", "no", "off":
+		return 0
 	case "1", "true", "yes", "on":
 		return time.Duration(sec) * time.Second
 	default:
-		return 0
+		return time.Duration(sec) * time.Second
 	}
 }
 
@@ -95,13 +98,16 @@ func (t *telegramCleanupTracker) start() {
 	go func() {
 		defer t.wg.Done()
 		runWithRecovery("telegram cleanup tracker", nil, func() {
+			runWithRecovery("telegram cleanup startup scan", nil, func() {
+				t.cleanupOnceWithReason(true, "startup")
+			})
 			ticker := time.NewTicker(t.interval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
 					runWithRecovery("telegram cleanup tick", nil, func() {
-						t.cleanupOnce(false)
+						t.cleanupOnceWithReason(false, "tick")
 					})
 				case <-stop:
 					return
@@ -163,17 +169,29 @@ func (t *telegramCleanupTracker) RecordPaths(paths []string) {
 }
 
 func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
+	t.cleanupOnceWithReason(forceScan, "manual")
+}
+
+func (t *telegramCleanupTracker) cleanupOnceWithReason(forceScan bool, reason string) {
 	if t == nil {
 		return
 	}
 	now := t.nowFn()
+	scanned := false
 	if forceScan || t.shouldScan(now) {
 		t.rebuildFromScan(now)
+		scanned = true
 	}
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	deletedCount := 0
+	var deletedBytes int64
 	if t.total <= t.maxBytes {
+		total := t.total
+		tracked := len(t.files)
+		scanRuns := t.scanRuns
+		t.mu.Unlock()
+		t.logCleanupStatus(reason, scanned, deletedCount, deletedBytes, total, tracked, scanRuns)
 		return
 	}
 	entries := make([]downloadFileEntry, 0, len(t.files))
@@ -198,6 +216,8 @@ func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
 			if os.IsNotExist(err) {
 				t.total -= entry.size
 				delete(t.files, entry.path)
+				deletedCount++
+				deletedBytes += entry.size
 				if t.onDelete != nil {
 					t.onDelete(entry.path, entry.size)
 				}
@@ -206,6 +226,8 @@ func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
 		}
 		t.total -= entry.size
 		delete(t.files, entry.path)
+		deletedCount++
+		deletedBytes += entry.size
 		if t.onDelete != nil {
 			t.onDelete(entry.path, entry.size)
 		}
@@ -213,6 +235,11 @@ func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
 	if t.total < 0 {
 		t.total = 0
 	}
+	total := t.total
+	tracked := len(t.files)
+	scanRuns := t.scanRuns
+	t.mu.Unlock()
+	t.logCleanupStatus(reason, scanned, deletedCount, deletedBytes, total, tracked, scanRuns)
 }
 
 func (t *telegramCleanupTracker) shouldScan(now time.Time) bool {
@@ -257,6 +284,31 @@ func (t *telegramCleanupTracker) rebuildFromScan(now time.Time) {
 		t.lastScan = now
 		t.scanRuns += scanRuns
 	}
+}
+
+func (t *telegramCleanupTracker) logCleanupStatus(reason string, scanned bool, deletedCount int, deletedBytes int64, total int64, tracked int, scanRuns int) {
+	if t == nil {
+		return
+	}
+	rootPaths := make([]string, 0, len(t.roots))
+	for _, root := range t.roots {
+		if strings.TrimSpace(root.Path) == "" {
+			continue
+		}
+		rootPaths = append(rootPaths, root.Path)
+	}
+	fmt.Printf(
+		"telegram cleanup status reason=%s total=%s max=%s tracked=%d scanned=%t scan_runs=%d deleted=%d reclaimed=%s roots=%s\n",
+		strings.TrimSpace(reason),
+		formatBytes(total),
+		formatBytes(t.maxBytes),
+		tracked,
+		scanned,
+		scanRuns,
+		deletedCount,
+		formatBytes(deletedBytes),
+		strings.Join(rootPaths, ","),
+	)
 }
 
 func (t *telegramCleanupTracker) cleanupRootForPathLocked(path string) (sharedstorage.CleanupRoot, bool) {

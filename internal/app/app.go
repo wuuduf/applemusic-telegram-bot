@@ -1554,6 +1554,7 @@ const (
 	defaultTaskWorkerLimit                    = 1
 	maxTaskWorkerLimit                        = 4
 	downloadWorkerPoolSize                    = 4
+	artistSongsProgressNotifyStep             = 50
 	pendingTTL                                = 10 * time.Minute
 	defaultTelegramFormat                     = "alac"
 	defaultTelegramAACType                    = "aac-lc"
@@ -5906,6 +5907,19 @@ func shouldReportCollectionTrackProgress(index int, total int) bool {
 	return completed%downloadStatusTrackStep == 0
 }
 
+func (b *TelegramBot) sendArtistSongsProgressUpdate(chatID int64, replyToID int, mediaType string, completed int, total int) {
+	if b == nil || b.client == nil {
+		return
+	}
+	if mediaType != mediaTypeArtistSongs || completed <= 0 || total <= 0 {
+		return
+	}
+	if completed%artistSongsProgressNotifyStep != 0 {
+		return
+	}
+	_ = b.sendMessageWithReply(chatID, fmt.Sprintf("%d/%d", completed, total), nil, replyToID)
+}
+
 func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, mediaType string, mediaID string, storefront string, status *DownloadStatus, progress func(phase string, done, total int64)) (bool, bool, error) {
 	if !shouldUseTelegramCollectionSequentialOneByOne(false, transferModeOneByOne, mediaType) {
 		return false, false, nil
@@ -5963,6 +5977,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (cached)", int64(idx+1), int64(totalTracks))
 			}
+			b.sendArtistSongsProgressUpdate(chatID, replyToID, mediaType, idx+1, totalTracks)
 			continue
 		}
 
@@ -5994,6 +6009,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (no output)", int64(idx+1), int64(totalTracks))
 			}
+			b.sendArtistSongsProgressUpdate(chatID, replyToID, mediaType, idx+1, totalTracks)
 			continue
 		}
 		downloadedAny = true
@@ -6024,6 +6040,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 			if status != nil && reportTrackProgress {
 				status.Update(trackLabel+" (no upload path)", int64(idx+1), int64(totalTracks))
 			}
+			b.sendArtistSongsProgressUpdate(chatID, replyToID, mediaType, idx+1, totalTracks)
 			continue
 		}
 		if b.cleanupTracker != nil {
@@ -6057,6 +6074,7 @@ func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID in
 		if status != nil && reportTrackProgress {
 			status.Update(trackLabel, int64(idx+1), int64(totalTracks))
 		}
+		b.sendArtistSongsProgressUpdate(chatID, replyToID, mediaType, idx+1, totalTracks)
 	}
 
 	if forceRefresh && downloadedAny && mediaType != "" && mediaID != "" {

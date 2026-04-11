@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -171,6 +172,39 @@ func TestHandleURLTargetWithOptionsUsesConfigStorefront(t *testing.T) {
 	}
 	if req.storefront != "cn" {
 		t.Fatalf("expected config storefront cn, got %q", req.storefront)
+	}
+}
+
+func TestSendArtistSongsProgressUpdateSendsEveryFifty(t *testing.T) {
+	var sentTexts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		text, _ := payload["text"].(string)
+		sentTexts = append(sentTexts, text)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+
+	bot.sendArtistSongsProgressUpdate(42, 7, mediaTypeArtistSongs, 49, 120)
+	bot.sendArtistSongsProgressUpdate(42, 7, mediaTypeArtistSongs, 50, 120)
+	bot.sendArtistSongsProgressUpdate(42, 7, mediaTypeAlbum, 50, 120)
+
+	if got := len(sentTexts); got != 1 {
+		t.Fatalf("expected exactly 1 progress message, got %d", got)
+	}
+	if sentTexts[0] != "50/120" {
+		t.Fatalf("unexpected progress text: %q", sentTexts[0])
 	}
 }
 

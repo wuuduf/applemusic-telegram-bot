@@ -261,15 +261,15 @@ func formatMVCaption(meta AudioMeta, sizeBytes int64) string {
 	title := strings.TrimSpace(meta.Title)
 	performer := strings.TrimSpace(meta.Performer)
 	if title == "" && performer == "" {
-		return fmt.Sprintf("#AppleMusic #mv %.2fMB\nvia @musicdlam_bot", sizeMB)
+		return fmt.Sprintf("#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", sizeMB)
 	}
 	if performer != "" && title != "" {
-		return fmt.Sprintf("%s - %s\n#AppleMusic #mv %.2fMB\nvia @musicdlam_bot", performer, title, sizeMB)
+		return fmt.Sprintf("%s - %s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", performer, title, sizeMB)
 	}
 	if title != "" {
-		return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @musicdlam_bot", title, sizeMB)
+		return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", title, sizeMB)
 	}
-	return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @musicdlam_bot", performer, sizeMB)
+	return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", performer, sizeMB)
 }
 
 func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
@@ -1202,7 +1202,7 @@ func formatTelegramCaption(sizeBytes int64, bitrateKbps float64, format string) 
 	if tag == "" {
 		tag = defaultTelegramFormat
 	}
-	return fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps\nvia @musicdlam_bot", tag, sizeMB, bitrateKbps)
+	return fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps\nvia @jellyamdl_bot", tag, sizeMB, bitrateKbps)
 }
 
 func extractInlineTrackID(query string) string {

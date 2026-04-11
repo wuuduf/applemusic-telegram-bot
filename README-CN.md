@@ -128,6 +128,7 @@ cp config.example.yaml config.yaml
 decrypt-m3u8-port: "wrapper:10020"
 get-m3u8-port: "wrapper:20020"
 telegram-api-url: "http://telegram-bot-api:8081"
+telegram-cache-file: "/app/runtime/telegram-cache.json"
 ```
 
 ### 3) 按注释修改 `docker-compose.yml`
@@ -149,9 +150,12 @@ telegram-api-url: "http://telegram-bot-api:8081"
 ### 4) 初始化宿主机目录与文件
 
 ```bash
-mkdir -p rootfs/data data/telegram-bot-api downloads
-touch telegram-cache.json
+mkdir -p rootfs/data data/telegram-bot-api downloads bot-runtime
+touch bot-runtime/telegram-cache.json
 ```
+
+> 注意：不要把缓存文件做单文件挂载（如 `./telegram-cache.json:/app/telegram-cache.json`）。  
+> 程序使用 atomic write（临时文件 + rename），在 Docker 单文件 bind mount 下可能报 `device or resource busy`。
 
 ### 5) 执行一次 wrapper 初始化登录（按需）
 
@@ -189,7 +193,7 @@ docker run --rm -it \
   --network host \
   -v "$PWD/config.yaml":/app/config.yaml \
   -v "$PWD/downloads":/downloads \
-  -v "$PWD/telegram-cache.json":/app/telegram-cache.json \
+  -v "$PWD/bot-runtime":/app/runtime \
   -e TELEGRAM_BOT_TOKEN=your_bot_token \
   applemusic-telegram-bot --bot
 ```

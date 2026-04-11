@@ -83,8 +83,8 @@ services:
       - "./config.yaml:/app/config.yaml:ro"
       # 下载目录
       - "./downloads:/downloads"
-      # Telegram file_id 缓存
-      - "./telegram-cache.json:/app/telegram-cache.json"
+      # Telegram file_id 缓存目录（避免单文件 bind mount 导致 atomic rename EBUSY）
+      - "./bot-runtime:/app/runtime"
 
 # ================== 关键协调关系（必须改 config.yaml）==================
 # 因为 bot 运行在容器内，不能再用 127.0.0.1 指向 wrapper / telegram-bot-api。
@@ -93,6 +93,7 @@ services:
 # decrypt-m3u8-port: "wrapper:10020"
 # get-m3u8-port: "wrapper:20020"
 # telegram-api-url: "http://telegram-bot-api:8081"
+# telegram-cache-file: "/app/runtime/telegram-cache.json"
 #
 # 启动：
 #   docker compose up -d --build

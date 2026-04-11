@@ -73,7 +73,7 @@ telegram-search-limit: 8          # Results per search
 telegram-search-language: "zh-Hans"      # Optional search language override (e.g. zh-Hans, zh-Hant)
 telegram-max-file-mb: 50          # Max file size to send
 telegram-download-folder: ""      # Optional override for downloads
-telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP)
+telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP). Docker 推荐挂目录并设为 /app/runtime/telegram-cache.json，避免单文件 bind mount rename EBUSY
 telegram-state-file: ""           # Runtime state snapshot path (pending panels + queued/in-flight tasks). Empty -> auto (cache basename + .state.json)
 telegram-metrics-interval-sec: 60  # Periodic metrics/health log interval
 telegram-resource-check-interval-sec: 30  # Resource guard re-check interval

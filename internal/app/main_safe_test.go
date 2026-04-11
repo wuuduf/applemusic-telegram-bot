@@ -1061,6 +1061,119 @@ func TestSendMessageWithReplyReturnRespectsLimiterWait(t *testing.T) {
 	}
 }
 
+func TestSendMessageWithReplyReturnIncludesRetryAfterFromHTTPBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5","parameters":{"retry_after":5}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+
+	_, err := bot.sendMessageWithReplyReturn(42, "hello", nil, 0)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	retryAfter, ok := parseTelegramRetryAfter(err)
+	if !ok {
+		t.Fatalf("expected retry_after to be parsed from %v", err)
+	}
+	if retryAfter != 5*time.Second {
+		t.Fatalf("expected retry_after=5s, got %s", retryAfter)
+	}
+}
+
+func TestNewDownloadStatusFallsBackOnRateLimit(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 4","parameters":{"retry_after":4}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+
+	output := captureStdoutForTest(t, func() {
+		status, err := newDownloadStatus(bot, 42, 0)
+		if err != nil {
+			t.Fatalf("expected fallback status, got err=%v", err)
+		}
+		if status == nil {
+			t.Fatalf("expected status")
+		}
+		if !status.disabled {
+			t.Fatalf("expected disabled fallback status")
+		}
+		if status.messageID != 0 {
+			t.Fatalf("expected no message id, got %d", status.messageID)
+		}
+		status.Update("Downloading", 1, 2)
+		status.UpdateSync("Done", 2, 2)
+		status.finishFailure()
+		status.finishSuccess()
+	})
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected exactly one sendMessage attempt, got %d", got)
+	}
+	if !strings.Contains(output, "continuing without status message") {
+		t.Fatalf("expected fallback log, got %q", output)
+	}
+}
+
+func TestRunDownloadContinuesWithoutStatusMessageOnRateLimit(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 3","parameters":{"retry_after":3}}`))
+		default:
+			t.Fatalf("unexpected telegram API call to %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+	var executed atomic.Bool
+
+	output := captureStdoutForTest(t, func() {
+		bot.runDownload(42, func(session *DownloadSession) error {
+			executed.Store(true)
+			return errNoFilesDownloaded
+		}, true, false, 0, ChatDownloadSettings{}, transferModeOneByOne, mediaTypeSong, "song-1", "us")
+	})
+
+	if !executed.Load() {
+		t.Fatalf("expected download function to execute despite status rate limit")
+	}
+	if strings.Contains(output, "status-create-failed") {
+		t.Fatalf("expected task to continue without status message, got %q", output)
+	}
+	if !strings.Contains(output, "result=no-files") {
+		t.Fatalf("expected no-files task result, got %q", output)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected only the initial status sendMessage attempt, got %d", got)
+	}
+}
+
 func TestEditMessageTextRespectsLimiterWait(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

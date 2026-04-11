@@ -896,6 +896,7 @@ type DownloadStatus struct {
 	bot         *TelegramBot
 	chatID      int64
 	messageID   int
+	disabled    bool
 	lastPhase   string
 	lastPercent int
 	lastText    string
@@ -915,6 +916,12 @@ type DownloadStatus struct {
 func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*DownloadStatus, error) {
 	messageID, err := bot.sendMessageWithReplyReturn(chatID, "Starting download...", nil, replyToID)
 	if err != nil {
+		if isTelegramRateLimitError(err) {
+			sanitized := sanitizeTelegramError(err, bot.token)
+			fmt.Printf("telegram status create deferred chat=%d: %s; continuing without status message\n", chatID, sanitized)
+			appendRuntimeErrorLogf("telegram status create deferred chat=%d: %s", chatID, sanitized)
+			return newDisabledDownloadStatus(bot, chatID), nil
+		}
 		return nil, err
 	}
 	// 进度消息在任务进行中不走自动删除计时。
@@ -935,8 +942,21 @@ func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*Download
 	return status, nil
 }
 
+func newDisabledDownloadStatus(bot *TelegramBot, chatID int64) *DownloadStatus {
+	return &DownloadStatus{
+		bot:      bot,
+		chatID:   chatID,
+		disabled: true,
+		updateCh: make(chan struct{}, 1),
+		stopCh:   make(chan struct{}),
+	}
+}
+
 func (s *DownloadStatus) Stop() {
 	if s == nil || s.bot == nil {
+		return
+	}
+	if s.stopCh == nil {
 		return
 	}
 	s.stopOnce.Do(func() {
@@ -949,6 +969,9 @@ func (s *DownloadStatus) finishSuccess() {
 		return
 	}
 	s.Stop()
+	if s.disabled || s.messageID == 0 {
+		return
+	}
 	if err := s.bot.deleteMessage(s.chatID, s.messageID); err != nil {
 		// 删除失败时兜底挂回自动删除，避免长期残留。
 		s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
@@ -960,11 +983,14 @@ func (s *DownloadStatus) finishFailure() {
 		return
 	}
 	s.Stop()
+	if s.disabled || s.messageID == 0 {
+		return
+	}
 	s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
 }
 
 func (s *DownloadStatus) Update(phase string, done, total int64) {
-	if s == nil || s.bot == nil {
+	if s == nil || s.bot == nil || s.disabled {
 		return
 	}
 	s.mu.Lock()
@@ -977,7 +1003,7 @@ func (s *DownloadStatus) Update(phase string, done, total int64) {
 }
 
 func (s *DownloadStatus) UpdateSync(phase string, done, total int64) {
-	if s == nil || s.bot == nil {
+	if s == nil || s.bot == nil || s.disabled {
 		return
 	}
 	s.mu.Lock()
@@ -1013,7 +1039,7 @@ func (s *DownloadStatus) loop() {
 }
 
 func (s *DownloadStatus) flush(force bool) {
-	if s == nil || s.bot == nil {
+	if s == nil || s.bot == nil || s.disabled {
 		return
 	}
 	s.mu.Lock()
@@ -1404,7 +1430,8 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("telegram sendMessage failed: %s", resp.Status)
+		responseBody, _ := io.ReadAll(resp.Body)
+		err = telegramAPIHTTPError("telegram sendMessage", resp.Status, responseBody)
 		b.noteTelegramRateLimit(err)
 		return 0, err
 	}
@@ -1413,7 +1440,7 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 		return 0, err
 	}
 	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendMessage error: %s", apiResp.Description)
+		err = telegramAPIResponseError("telegram sendMessage", apiResp.Description, apiResp.Parameters)
 		b.noteTelegramRateLimit(err)
 		return 0, err
 	}

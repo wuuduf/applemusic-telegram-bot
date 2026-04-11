@@ -1860,38 +1860,48 @@ type KeyboardButton struct {
 }
 
 type getUpdatesResponse struct {
-	OK          bool     `json:"ok"`
-	Result      []Update `json:"result"`
-	Description string   `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Result      []Update              `json:"result"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
+}
+
+type apiResponseParameters struct {
+	RetryAfter int `json:"retry_after,omitempty"`
 }
 
 type apiResponse struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }
 
 type sendMessageResponse struct {
-	OK          bool    `json:"ok"`
-	Result      Message `json:"result"`
-	Description string  `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Result      Message               `json:"result"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }
 
 type sendAudioResponse struct {
-	OK          bool         `json:"ok"`
-	Result      AudioMessage `json:"result"`
-	Description string       `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Result      AudioMessage          `json:"result"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }
 
 type sendDocumentResponse struct {
-	OK          bool            `json:"ok"`
-	Result      DocumentMessage `json:"result"`
-	Description string          `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Result      DocumentMessage       `json:"result"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }
 
 type sendVideoResponse struct {
-	OK          bool         `json:"ok"`
-	Result      VideoMessage `json:"result"`
-	Description string       `json:"description,omitempty"`
+	OK          bool                  `json:"ok"`
+	Result      VideoMessage          `json:"result"`
+	Description string                `json:"description,omitempty"`
+	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }
 
 type AudioMessage struct {
@@ -6504,6 +6514,43 @@ func parseTelegramRetryAfter(err error) (time.Duration, bool) {
 		return time.Duration(sec) * time.Second, true
 	}
 	return 0, false
+}
+
+func isTelegramRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errTelegramSendDeferred) {
+		return true
+	}
+	if _, ok := parseTelegramRetryAfter(err); ok {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "429") && strings.Contains(lower, "too many requests")
+}
+
+func telegramAPIHTTPError(operation string, status string, responseBody []byte) error {
+	bodyText := strings.TrimSpace(string(bytes.TrimSpace(responseBody)))
+	if bodyText == "" {
+		return fmt.Errorf("%s failed: %s", operation, status)
+	}
+	return fmt.Errorf("%s failed: %s %s", operation, status, bodyText)
+}
+
+func telegramAPIResponseError(operation string, description string, params apiResponseParameters) error {
+	description = strings.TrimSpace(description)
+	if params.RetryAfter > 0 {
+		if description == "" {
+			description = fmt.Sprintf(`{"parameters":{"retry_after":%d}}`, params.RetryAfter)
+		} else {
+			description = fmt.Sprintf(`%s {"parameters":{"retry_after":%d}}`, description, params.RetryAfter)
+		}
+	}
+	if description == "" {
+		return fmt.Errorf("%s error", operation)
+	}
+	return fmt.Errorf("%s error: %s", operation, description)
 }
 
 func isPipeClosedError(err error) bool {

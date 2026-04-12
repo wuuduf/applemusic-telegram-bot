@@ -1644,6 +1644,9 @@ func TestNormalizeChatSettingsDefaultLanguage(t *testing.T) {
 	if !normalized.EmbedLyrics || !normalized.EmbedCover {
 		t.Fatalf("expected default embed toggles on, got lyrics=%t cover=%t", normalized.EmbedLyrics, normalized.EmbedCover)
 	}
+	if normalized.SongComment {
+		t.Fatalf("expected song comment disabled by default")
+	}
 }
 
 func TestNormalizeChatSettingsLegacyKeepsEmbedDefaultOn(t *testing.T) {
@@ -1661,6 +1664,53 @@ func TestSetChatLanguage(t *testing.T) {
 	settings := b.setChatLanguage(1001, telegramLanguageEn)
 	if settings.Language != telegramLanguageEn {
 		t.Fatalf("expected language to be en, got %q", settings.Language)
+	}
+}
+
+func TestToggleChatSongComment(t *testing.T) {
+	b := &TelegramBot{chatSettings: make(map[int64]ChatDownloadSettings)}
+	first := b.toggleChatSongComment(1001)
+	if !first.SongComment {
+		t.Fatalf("expected song comment enabled after first toggle")
+	}
+	second := b.toggleChatSongComment(1001)
+	if second.SongComment {
+		t.Fatalf("expected song comment disabled after second toggle")
+	}
+}
+
+func TestRenderSongCommentTemplateZHSections(t *testing.T) {
+	meta := AudioMeta{
+		Title:          "Love Song",
+		Performer:      "方大同",
+		DurationMillis: 269000,
+		AlbumName:      "未来",
+		ComposerName:   "方大同",
+		ReleaseDate:    "2007-12-28",
+		HasLyrics:      true,
+	}
+	got := renderSongCommentTemplateZH(
+		meta,
+		"这首作品以情绪递进和细节表达见长。",
+		[]string{"R&B", "Soul", "华语流行"},
+		10748,
+		102813,
+	)
+	for _, must := range []string{
+		"🎧 歌曲赏析",
+		"风格：",
+		"结构：",
+		"编曲：",
+		"人声：",
+		"主题：",
+		"总结：",
+	} {
+		if !strings.Contains(got, must) {
+			t.Fatalf("expected rendered comment to contain %q, got: %s", must, got)
+		}
+	}
+	if len([]rune(got)) < 120 {
+		t.Fatalf("expected richer comment output, got too short: %s", got)
 	}
 }
 

@@ -81,7 +81,7 @@ go run . --search song "Taylor Swift"
 - `/cv <url|type id>` 仅封面
 - `/ac <url|type id>` 仅动态封面
 - `/ly <song|album target>` 导出歌词
-- `/st [value]` 设置（格式/歌词/语言/songzip/worker 等）
+- `/st [value]` 设置（格式/歌词/语言/songzip/worker/歌曲赏析开关等）
 
 补充 ID 命令：
 
@@ -90,6 +90,7 @@ go run . --search song "Taylor Swift"
 ## 关键配置项
 
 - `telegram-cache-file`
+- `lastfm-api-key`（用于歌曲赏析来源）
 - `telegram-state-file`
 - `telegram-download-max-gb`
 - `telegram-cleanup-interval-sec`

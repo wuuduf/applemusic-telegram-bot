@@ -124,6 +124,63 @@ func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *D
 	}
 }
 
+type multipartField struct {
+	name  string
+	value string
+}
+
+type uploadProgressReader struct {
+	reader     io.Reader
+	onProgress func()
+}
+
+func (r *uploadProgressReader) Read(p []byte) (int, error) {
+	if r == nil || r.reader == nil {
+		return 0, io.EOF
+	}
+	n, err := r.reader.Read(p)
+	if n > 0 && r.onProgress != nil {
+		r.onProgress()
+	}
+	return n, err
+}
+
+func buildMultipartSingleFileEnvelope(fields []multipartField, fileField string, fileName string) (contentType string, prefix []byte, suffix []byte, err error) {
+	var envelope bytes.Buffer
+	writer := multipart.NewWriter(&envelope)
+	for _, field := range fields {
+		if strings.TrimSpace(field.name) == "" {
+			continue
+		}
+		if err := writer.WriteField(field.name, field.value); err != nil {
+			return "", nil, nil, err
+		}
+	}
+	if _, err := writer.CreateFormFile(fileField, fileName); err != nil {
+		return "", nil, nil, err
+	}
+	prefixLen := envelope.Len()
+	if err := writer.Close(); err != nil {
+		return "", nil, nil, err
+	}
+	raw := envelope.Bytes()
+	prefix = append(prefix, raw[:prefixLen]...)
+	suffix = append(suffix, raw[prefixLen:]...)
+	return writer.FormDataContentType(), prefix, suffix, nil
+}
+
+func annotateFilePartsInvalidError(err error, fileSize int64, maxFileBytes int64) error {
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "file_parts_invalid") {
+		return err
+	}
+	sizeMB := float64(fileSize) / 1024 / 1024
+	limitMB := float64(maxFileBytes) / 1024 / 1024
+	return fmt.Errorf("%w (file_size=%.2fMB, telegram_max_file=%.0fMB; FILE_PARTS_INVALID usually indicates empty file, file too large for current Bot API mode, or bot-api upload part failure)", err, sizeMB, limitMB)
+}
+
 func sleepWithContext(ctx context.Context, duration time.Duration) error {
 	if duration <= 0 {
 		return nil
@@ -508,7 +565,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		}
 		err = fmt.Errorf("telegram sendAudio failed: %s", msg)
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, sizeBytes, b.maxFileBytes)
 	}
 	apiResp := sendAudioResponse{}
 	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
@@ -517,7 +574,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	if !apiResp.OK {
 		err = fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, sizeBytes, b.maxFileBytes)
 	}
 	shouldCacheAudio := true
 	if session != nil {
@@ -535,6 +592,9 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 			Title:          meta.Title,
 			Performer:      meta.Performer,
 		})
+	}
+	if hasMeta {
+		b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, meta)
 	}
 	return nil
 }
@@ -557,6 +617,9 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 	if err != nil {
 		return err
 	}
+	if info.Size() <= 0 {
+		return fmt.Errorf("document is empty: %s", filepath.Base(filePath))
+	}
 	if info.Size() > b.maxFileBytes {
 		if strings.HasSuffix(strings.ToLower(displayName), ".zip") {
 			return fmt.Errorf("ZIP exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)
@@ -571,77 +634,47 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 		status.Update(uploadPhase, 0, info.Size())
 	}
 
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-	contentType := writer.FormDataContentType()
-	writeErrCh := make(chan error, 1)
 	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
 	defer stopWatchdog()
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendDocument"), pr)
+	fields := []multipartField{{name: "chat_id", value: strconv.FormatInt(chatID, 10)}}
+	if replyToID > 0 {
+		fields = append(fields, multipartField{name: "reply_to_message_id", value: strconv.Itoa(replyToID)})
+	}
+	contentType, prefix, suffix, err := buildMultipartSingleFileEnvelope(fields, "document", displayName)
 	if err != nil {
-		_ = pw.CloseWithError(err)
 		return err
 	}
+	contentLength := int64(len(prefix)) + info.Size() + int64(len(suffix))
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	body := io.MultiReader(
+		bytes.NewReader(prefix),
+		&uploadProgressReader{reader: file, onProgress: touchProgress},
+		bytes.NewReader(suffix),
+	)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendDocument"), body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = contentLength
 	req.Header.Set("Content-Type", contentType)
-	go func() {
-		defer stopWatchdog()
-		defer func() {
-			if rec := recover(); rec != nil {
-				panicErr := logRecoveredPanic("telegram sendDocument multipart writer", rec)
-				_ = pw.CloseWithError(panicErr)
-				writeErrCh <- panicErr
-			}
-		}()
-		err := func() error {
-			if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
-				return err
-			}
-			if replyToID > 0 {
-				if err := writer.WriteField("reply_to_message_id", strconv.Itoa(replyToID)); err != nil {
-					return err
-				}
-			}
-			part, err := writer.CreateFormFile("document", displayName)
-			if err != nil {
-				return err
-			}
-			file, err := os.Open(filePath)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			if _, err := copyWithUploadProgress(part, file, info.Size(), status, uploadPhase, touchProgress); err != nil {
-				return err
-			}
-			return writer.Close()
-		}()
-		if err != nil {
-			_ = pw.CloseWithError(err)
-		} else {
-			_ = pw.Close()
-		}
-		writeErrCh <- err
-	}()
 	resp, err := b.client.Do(req)
 	if err != nil {
-		_ = pw.CloseWithError(err)
-		writeErr := <-writeErrCh
 		if watchdogStalled() {
 			return fmt.Errorf("document upload stalled: no progress for %s", uploadNoProgressTimeout)
 		}
-		return combineStreamingRequestError(err, writeErr)
+		return err
 	}
 	defer resp.Body.Close()
-	writeErr := <-writeErrCh
-	if writeErr != nil {
-		return writeErr
-	}
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)
 		err = fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
 	apiResp := sendDocumentResponse{}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
@@ -650,7 +683,7 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 	if !apiResp.OK {
 		err = fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
 	if cacheKey != "" && apiResp.Result.Document.FileID != "" {
 		b.storeCachedDocument(cacheKey, CachedDocument{
@@ -723,6 +756,9 @@ func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64
 	if err != nil {
 		return err
 	}
+	if info.Size() <= 0 {
+		return fmt.Errorf("video is empty: %s", filepath.Base(filePath))
+	}
 	if info.Size() > b.maxFileBytes {
 		return fmt.Errorf("video exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)
 	}
@@ -730,85 +766,53 @@ func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64
 		status.Update("Uploading video", 0, info.Size())
 	}
 
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-	contentType := writer.FormDataContentType()
-	writeErrCh := make(chan error, 1)
 	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
 	defer stopWatchdog()
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendVideo"), pr)
+	fields := []multipartField{
+		{name: "chat_id", value: strconv.FormatInt(chatID, 10)},
+		{name: "supports_streaming", value: "true"},
+	}
+	if replyToID > 0 {
+		fields = append(fields, multipartField{name: "reply_to_message_id", value: strconv.Itoa(replyToID)})
+	}
+	if caption != "" {
+		fields = append(fields, multipartField{name: "caption", value: caption})
+	}
+	contentType, prefix, suffix, err := buildMultipartSingleFileEnvelope(fields, "video", filepath.Base(filePath))
 	if err != nil {
-		_ = pw.CloseWithError(err)
 		return err
 	}
+	contentLength := int64(len(prefix)) + info.Size() + int64(len(suffix))
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	body := io.MultiReader(
+		bytes.NewReader(prefix),
+		&uploadProgressReader{reader: file, onProgress: touchProgress},
+		bytes.NewReader(suffix),
+	)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", b.apiURL("sendVideo"), body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = contentLength
 	req.Header.Set("Content-Type", contentType)
-	go func() {
-		defer stopWatchdog()
-		defer func() {
-			if rec := recover(); rec != nil {
-				panicErr := logRecoveredPanic("telegram sendVideo multipart writer", rec)
-				_ = pw.CloseWithError(panicErr)
-				writeErrCh <- panicErr
-			}
-		}()
-		err := func() error {
-			if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
-				return err
-			}
-			if replyToID > 0 {
-				if err := writer.WriteField("reply_to_message_id", strconv.Itoa(replyToID)); err != nil {
-					return err
-				}
-			}
-			if caption != "" {
-				if err := writer.WriteField("caption", caption); err != nil {
-					return err
-				}
-			}
-			if err := writer.WriteField("supports_streaming", "true"); err != nil {
-				return err
-			}
-			part, err := writer.CreateFormFile("video", filepath.Base(filePath))
-			if err != nil {
-				return err
-			}
-			file, err := os.Open(filePath)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			if _, err := copyWithUploadProgress(part, file, info.Size(), status, "Uploading video", touchProgress); err != nil {
-				return err
-			}
-			return writer.Close()
-		}()
-		if err != nil {
-			_ = pw.CloseWithError(err)
-		} else {
-			_ = pw.Close()
-		}
-		writeErrCh <- err
-	}()
 	resp, err := b.client.Do(req)
 	if err != nil {
-		_ = pw.CloseWithError(err)
-		writeErr := <-writeErrCh
 		if watchdogStalled() {
 			return fmt.Errorf("video upload stalled: no progress for %s", uploadNoProgressTimeout)
 		}
-		return combineStreamingRequestError(err, writeErr)
+		return err
 	}
 	defer resp.Body.Close()
-	writeErr := <-writeErrCh
-	if writeErr != nil {
-		return writeErr
-	}
 	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
 	apiResp := sendVideoResponse{}
 	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
@@ -817,7 +821,7 @@ func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64
 	if !apiResp.OK {
 		err = fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
 		b.noteTelegramRateLimit(err)
-		return err
+		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
 	if cacheKey != "" && apiResp.Result.Video.FileID != "" {
 		b.storeCachedVideo(cacheKey, CachedVideo{
@@ -1532,5 +1536,11 @@ func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyTo
 		b.noteTelegramRateLimit(err)
 		return err
 	}
+	b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, AudioMeta{
+		TrackID:   strings.TrimSpace(trackID),
+		Title:     strings.TrimSpace(entry.Title),
+		Performer: strings.TrimSpace(entry.Performer),
+		Format:    format,
+	})
 	return nil
 }

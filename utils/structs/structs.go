@@ -47,6 +47,7 @@ type ConfigSet struct {
 	ConvertWarnLossyToLossless       bool    `yaml:"convert-warn-lossy-to-lossless"`
 	ConvertSkipLossyToLossless       bool    `yaml:"convert-skip-lossy-to-lossless"`
 	TelegramBotToken                 string  `yaml:"telegram-bot-token"`
+	LastFMAPIKey                     string  `yaml:"lastfm-api-key"`
 	TelegramAllowedChatIDs           []int64 `yaml:"telegram-allowed-chat-ids"`
 	TelegramSearchLimit              int     `yaml:"telegram-search-limit"`
 	TelegramSearchLanguage           string  `yaml:"telegram-search-language"`

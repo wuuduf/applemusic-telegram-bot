@@ -78,6 +78,14 @@ type AudioMeta struct {
 	Performer      string
 	DurationMillis int64
 	Format         string
+	AlbumName      string
+	ComposerName   string
+	ReleaseDate    string
+	GenreNames     []string
+	AudioTraits    []string
+	Storefront     string
+	HasLyrics      bool
+	ContentRating  string
 }
 
 type CachedAudio struct {
@@ -103,6 +111,11 @@ type CachedVideo struct {
 	FileID    string    `json:"file_id"`
 	FileSize  int64     `json:"file_size,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+type songCommentCacheEntry struct {
+	Text      string
+	ExpiresAt time.Time
 }
 
 type DownloadSession struct {
@@ -191,6 +204,14 @@ func (s *DownloadSession) recordDownloadedTrack(track *task.Track, format string
 		Performer:      strings.TrimSpace(track.Resp.Attributes.ArtistName),
 		DurationMillis: int64(track.Resp.Attributes.DurationInMillis),
 		Format:         strings.TrimSpace(format),
+		AlbumName:      strings.TrimSpace(track.Resp.Attributes.AlbumName),
+		ComposerName:   strings.TrimSpace(track.Resp.Attributes.ComposerName),
+		ReleaseDate:    strings.TrimSpace(track.Resp.Attributes.ReleaseDate),
+		GenreNames:     append([]string(nil), track.Resp.Attributes.GenreNames...),
+		AudioTraits:    append([]string(nil), track.Resp.Attributes.AudioTraits...),
+		Storefront:     strings.TrimSpace(track.Storefront),
+		HasLyrics:      track.Resp.Attributes.HasLyrics,
+		ContentRating:  strings.TrimSpace(track.Resp.Attributes.ContentRating),
 	}
 	if meta.TrackID != "" {
 		if override, ok := popSearchMeta(meta.TrackID); ok {
@@ -1638,6 +1659,7 @@ type ChatDownloadSettings struct {
 	AutoLyrics     bool
 	AutoCover      bool
 	AutoAnimated   bool
+	SongComment    bool
 	SettingsInited bool
 }
 
@@ -1766,6 +1788,9 @@ type TelegramBot struct {
 	autoDeleteMessages map[string]*time.Timer
 	autoDeleteSticky   map[string]bool
 	autoDeleteDeadline map[string]time.Time
+
+	songCommentMu    sync.Mutex
+	songCommentCache map[string]songCommentCacheEntry
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -2561,6 +2586,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		autoDeleteMessages:      make(map[string]*time.Timer),
 		autoDeleteSticky:        make(map[string]bool),
 		autoDeleteDeadline:      make(map[string]time.Time),
+		songCommentCache:        make(map[string]songCommentCacheEntry),
 		sendLimiter:             newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
 		shutdownCtx:             shutdownCtx,
 		shutdownCancel:          shutdownCancel,
@@ -2980,11 +3006,13 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 	autoLyrics := settings.AutoLyrics
 	autoCover := settings.AutoCover
 	autoAnimated := settings.AutoAnimated
+	songComment := settings.SongComment
 	if !settings.SettingsInited {
 		songZip = false
 		autoLyrics = false
 		autoCover = false
 		autoAnimated = false
+		songComment = false
 	}
 	return ChatDownloadSettings{
 		Format:         normalizedFormat,
@@ -2999,6 +3027,7 @@ func normalizeChatSettings(settings ChatDownloadSettings) ChatDownloadSettings {
 		AutoLyrics:     autoLyrics,
 		AutoCover:      autoCover,
 		AutoAnimated:   autoAnimated,
+		SongComment:    songComment,
 		SettingsInited: true,
 	}
 }
@@ -3139,6 +3168,28 @@ func (b *TelegramBot) toggleChatAutoAnimated(chatID int64) ChatDownloadSettings 
 	})
 }
 
+func (b *TelegramBot) toggleChatSongComment(chatID int64) ChatDownloadSettings {
+	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
+		current.SongComment = !current.SongComment
+		return current
+	})
+}
+
+func (b *TelegramBot) maybeNotifySongCommentConfig(chatID int64, replyToID int, settings ChatDownloadSettings) {
+	normalized := normalizeChatSettings(settings)
+	if !normalized.SongComment {
+		return
+	}
+	if strings.TrimSpace(resolveLastFMAPIKey()) != "" {
+		return
+	}
+	message := "歌曲赏析已开启，但尚未配置 Last.fm API Key。\n请在 config.yaml 设置 lastfm-api-key，或设置环境变量 LASTFM_API_KEY。"
+	if normalized.Language == telegramLanguageEn {
+		message = "Song comment is enabled, but Last.fm API key is missing.\nSet `lastfm-api-key` in config.yaml, or export LASTFM_API_KEY."
+	}
+	_ = b.sendMessageWithReply(chatID, message, nil, replyToID)
+}
+
 func (b *TelegramBot) toggleChatSongZip(chatID int64) ChatDownloadSettings {
 	return b.updateChatSettings(chatID, func(current ChatDownloadSettings) ChatDownloadSettings {
 		current.SongZip = !current.SongZip
@@ -3238,6 +3289,10 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	} else if data == "setting_auto:animated" {
 		settings := b.toggleChatAutoAnimated(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+	} else if data == "setting_auto:comment" {
+		settings := b.toggleChatSongComment(cb.Message.Chat.ID)
+		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
+		b.maybeNotifySongCommentConfig(cb.Message.Chat.ID, cb.Message.MessageID, settings)
 	} else if data == "setting_song_zip" {
 		settings := b.toggleChatSongZip(cb.Message.Chat.ID)
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
@@ -3593,6 +3648,25 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				}
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
+			case "comment", "comment_on", "comment_off",
+				"song_comment", "song_comment_on", "song_comment_off",
+				"analysis", "analysis_on", "analysis_off",
+				"song_analysis", "song_analysis_on", "song_analysis_off",
+				"赏析", "赏析_on", "赏析_off":
+				if strings.HasSuffix(raw, "_on") {
+					if !settings.SongComment {
+						settings = b.toggleChatSongComment(chatID)
+					}
+				} else if strings.HasSuffix(raw, "_off") {
+					if settings.SongComment {
+						settings = b.toggleChatSongComment(chatID)
+					}
+				} else {
+					settings = b.toggleChatSongComment(chatID)
+				}
+				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+				b.maybeNotifySongCommentConfig(chatID, replyToID, settings)
+				return
 			case "songzip", "song_zip", "songzip_toggle", "song_zip_toggle":
 				settings = b.toggleChatSongZip(chatID)
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
@@ -3610,7 +3684,7 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
 				return
 			}
-			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|zh|en|lyrics|cover|auto_lyrics|auto_cover|animated|songzip|worker1..worker4]", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /settings [alac|flac|aac|atmos|aac-lc|aac-binaural|aac-downmix|ac3|lrc|ttml|zh|en|lyrics|cover|auto_lyrics|auto_cover|animated|comment|songzip|worker1..worker4]", nil, replyToID)
 			return
 		}
 		settings := b.getChatSettings(chatID)
@@ -6561,6 +6635,7 @@ func isRetryableUploadError(err error) bool {
 		"bad gateway",
 		"temporarily unavailable",
 		"too many requests",
+		"file_parts_invalid",
 	}
 	for _, hint := range retryableHints {
 		if strings.Contains(lower, hint) {
@@ -7219,7 +7294,7 @@ func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 		if normalized.SongZip {
 			songTransfer = "ZIP"
 		}
-		return fmt.Sprintf("Download settings:\n- Language: English\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Embed: lyrics=%t cover=%t\n- Auto extra files: lyrics=%t cover=%t animated=%t",
+		return fmt.Sprintf("Download settings:\n- Language: English\n- Format: %s\n- AAC type: %s\n- MV audio: %s\n- Lyrics format: %s\n- Song transfer: %s\n- Task workers(global): %d\n- Embed: lyrics=%t cover=%t\n- Auto extra files: lyrics=%t cover=%t animated=%t\n- Song comment: %t",
 			strings.ToUpper(normalized.Format),
 			normalized.AACType,
 			normalized.MVAudioType,
@@ -7231,9 +7306,10 @@ func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 			normalized.AutoLyrics,
 			normalized.AutoCover,
 			normalized.AutoAnimated,
+			normalized.SongComment,
 		)
 	}
-	return fmt.Sprintf("下载设置：\n- 语言：中文\n- 格式：%s\n- AAC 类型：%s\n- MV 音频：%s\n- 歌词格式：%s\n- 歌曲发送：%s\n- 任务线程（全局）：%d\n- 内嵌：歌词=%t 封面=%t\n- 自动附加文件：歌词=%t 封面=%t 动态封面=%t",
+	return fmt.Sprintf("下载设置：\n- 语言：中文\n- 格式：%s\n- AAC 类型：%s\n- MV 音频：%s\n- 歌词格式：%s\n- 歌曲发送：%s\n- 任务线程（全局）：%d\n- 内嵌：歌词=%t 封面=%t\n- 自动附加文件：歌词=%t 封面=%t 动态封面=%t\n- 歌曲赏析：%t",
 		strings.ToUpper(normalized.Format),
 		normalized.AACType,
 		normalized.MVAudioType,
@@ -7245,6 +7321,7 @@ func (b *TelegramBot) formatSettingsText(settings ChatDownloadSettings) string {
 		normalized.AutoLyrics,
 		normalized.AutoCover,
 		normalized.AutoAnimated,
+		normalized.SongComment,
 	)
 }
 
@@ -7269,6 +7346,7 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 	autoLyricsLabel := "Extra Lyrics"
 	autoCoverLabel := "Extra Cover"
 	autoAnimatedLabel := "Extra Animated"
+	songCommentLabel := "Song Comment"
 	workerLabel := "Worker"
 	if lang != telegramLanguageEn {
 		binauralLabel = "双耳"
@@ -7284,6 +7362,7 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 		autoLyricsLabel = "额外歌词"
 		autoCoverLabel = "额外封面"
 		autoAnimatedLabel = "额外动态封面"
+		songCommentLabel = "歌曲赏析"
 		workerLabel = "线程"
 	}
 	return InlineKeyboardMarkup{
@@ -7338,6 +7417,9 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 				{Text: settingButtonText(autoAnimatedLabel, normalized.AutoAnimated), CallbackData: "setting_auto:animated"},
 			},
 			{
+				{Text: settingButtonText(songCommentLabel, normalized.SongComment), CallbackData: "setting_auto:comment"},
+			},
+			{
 				{Text: "❌", CallbackData: "panel_cancel"},
 			},
 		},
@@ -7359,7 +7441,7 @@ func botHelpText() string {
 /cv <url|type id> 仅下载封面
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）
-/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/内嵌开关/自动附加）
+/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/内嵌开关/自动附加/歌曲赏析）
 
 参数说明：
 - /s 的 <类型>：song | album | artist
@@ -7367,6 +7449,7 @@ func botHelpText() string {
 - /ac 的 type：song | album | playlist | station
 - /st 任务线程：worker1 | worker2 | worker3 | worker4（默认 worker1）
 - /st 语言：zh | en
+- /st 赏析：comment | comment_on | comment_off
 
 也支持直接发送 Apple Music 链接（自动识别）：
 song | album | playlist | artist | station | music-video
@@ -7389,7 +7472,7 @@ Command list (short aliases):
 /cv <url|type id> Download static cover only
 /ac <url|type id> Download animated cover only
 /ly <song|album> Export lyrics files (format depends on settings)
-/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/embed toggles/auto extras/language)
+/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/embed toggles/auto extras/song comment/language)
 
 Parameters:
 - /s <type>: song | album | artist
@@ -7397,6 +7480,7 @@ Parameters:
 - /ac type: song | album | playlist | station
 - /st workers: worker1 | worker2 | worker3 | worker4 (default worker1)
 - /st language: zh | en
+- /st song comment: comment | comment_on | comment_off
 
 You can also send Apple Music URLs directly (auto recognized):
 song | album | playlist | artist | station | music-video

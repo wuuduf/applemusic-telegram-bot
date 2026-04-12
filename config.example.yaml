@@ -62,6 +62,7 @@ convert-warn-lossy-to-lossless: true # If true, print a warning when converting 
 convert-skip-lossy-to-lossless: true # If true, skip converting detected lossy sources to lossless target formats (flac/wav)
 # Telegram bot settings
 telegram-bot-token: ""            # Bot token or set TELEGRAM_BOT_TOKEN
+lastfm-api-key: ""                # Optional: enable song comment source (Last.fm) for Telegram song analysis messages
 telegram-api-url: ""              # Optional API base URL override (default: https://api.telegram.org). Avoid plain HTTP unless you trust the network.
 telegram-http-timeout-sec: 180    # Telegram API request timeout for send/edit/upload calls
 telegram-poll-timeout-sec: 75     # getUpdates long-poll HTTP timeout (should be > 30)

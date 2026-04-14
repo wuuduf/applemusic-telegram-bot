@@ -106,7 +106,9 @@ func (s *Service) FetchArtwork(target ArtworkTarget) (ArtworkInfo, error) {
 					albumItem, dataErr := firstAlbumData(s.op("fetchArtwork.song.album"), albumResp)
 					if dataErr == nil {
 						result.MotionURL = firstNonEmpty(
+							albumItem.Attributes.EditorialVideo.MotionDetailSquare.Video,
 							albumItem.Attributes.EditorialVideo.MotionSquare.Video,
+							albumItem.Attributes.EditorialVideo.MotionDetailTall.Video,
 							albumItem.Attributes.EditorialVideo.MotionTall.Video,
 						)
 					}
@@ -133,7 +135,9 @@ func (s *Service) FetchArtwork(target ArtworkTarget) (ArtworkInfo, error) {
 			DisplayName: composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
 			MotionURL: firstNonEmpty(
+				item.Attributes.EditorialVideo.MotionDetailSquare.Video,
 				item.Attributes.EditorialVideo.MotionSquare.Video,
+				item.Attributes.EditorialVideo.MotionDetailTall.Video,
 				item.Attributes.EditorialVideo.MotionTall.Video,
 			),
 		}
@@ -157,7 +161,9 @@ func (s *Service) FetchArtwork(target ArtworkTarget) (ArtworkInfo, error) {
 			DisplayName: strings.TrimSpace(item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
 			MotionURL: firstNonEmpty(
+				item.Attributes.EditorialVideo.MotionDetailSquare.Video,
 				item.Attributes.EditorialVideo.MotionSquare.Video,
+				item.Attributes.EditorialVideo.MotionDetailTall.Video,
 				item.Attributes.EditorialVideo.MotionTall.Video,
 			),
 		}
@@ -181,7 +187,9 @@ func (s *Service) FetchArtwork(target ArtworkTarget) (ArtworkInfo, error) {
 			DisplayName: strings.TrimSpace(item.Attributes.Name),
 			CoverURL:    strings.TrimSpace(item.Attributes.Artwork.URL),
 			MotionURL: firstNonEmpty(
+				item.Attributes.EditorialVideo.MotionDetailSquare.Video,
 				item.Attributes.EditorialVideo.MotionSquare.Video,
+				item.Attributes.EditorialVideo.MotionDetailTall.Video,
 				item.Attributes.EditorialVideo.MotionTall.Video,
 			),
 		}

@@ -66,6 +66,23 @@ func TestFetchArtworkSongUsesAlbumMotion(t *testing.T) {
 	}
 }
 
+func TestFetchArtworkAlbumPrefersMotionDetailSquare(t *testing.T) {
+	service := &Service{
+		AppleToken: "token",
+		GetAlbumResp: func(storefront string, id string, language string, token string) (*ampapi.AlbumResp, error) {
+			return mustAlbumResp(t, `{"data":[{"id":"album-1","type":"albums","attributes":{"artistName":"Artist","name":"Album","artwork":{"url":"https://example.com/album.jpg"},"editorialVideo":{"motionDetailSquare":{"video":"https://example.com/detail-square.m3u8"},"motionSquareVideo1x1":{"video":"https://example.com/square.m3u8"},"motionDetailTall":{"video":"https://example.com/detail-tall.m3u8"}}},"relationships":{"tracks":{"data":[]}}}]}`), nil
+		},
+	}
+
+	info, err := service.FetchArtwork(ArtworkTarget{MediaType: mediaTypeAlbum, ID: "album-1", Storefront: "us"})
+	if err != nil {
+		t.Fatalf("FetchArtwork failed: %v", err)
+	}
+	if info.MotionURL != "https://example.com/detail-square.m3u8" {
+		t.Fatalf("unexpected motion url: %q", info.MotionURL)
+	}
+}
+
 func TestFetchLyricsOnlyFallsBack(t *testing.T) {
 	service := &Service{
 		GetLyrics: func(storefront string, songID string, lyricType string, language string, outputFormat string, token string, mediaUserToken string) (string, error) {

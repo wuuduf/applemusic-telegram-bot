@@ -576,7 +576,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		return err
 	}
 	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		err = telegramAPIResponseError("telegram sendAudio", apiResp.Description, apiResp.Parameters)
 		b.noteTelegramRateLimit(err)
 		return annotateFilePartsInvalidError(err, sizeBytes, b.maxFileBytes)
 	}
@@ -1639,7 +1639,7 @@ func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAud
 		return err
 	}
 	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendAudio error: %s", apiResp.Description)
+		err = telegramAPIResponseError("telegram sendAudio", apiResp.Description, apiResp.Parameters)
 		b.noteTelegramRateLimit(err)
 		return err
 	}

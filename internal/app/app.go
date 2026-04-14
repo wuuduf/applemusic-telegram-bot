@@ -1509,6 +1509,10 @@ func extractVideo(c string) (string, error) {
 }
 
 func extractVideoWithConfig(c string, cfg structs.ConfigSet) (string, error) {
+	return extractVideoWithPreference(c, cfg, videoAspectAny)
+}
+
+func extractVideoWithPreference(c string, cfg structs.ConfigSet, preference videoAspectPreference) (string, error) {
 	MediaUrl, err := url.Parse(c)
 	if err != nil {
 		return "", err
@@ -1537,37 +1541,20 @@ func extractVideoWithConfig(c string, cfg structs.ConfigSet) (string, error) {
 
 	video := from.(*m3u8.MasterPlaylist)
 
-	re := regexp.MustCompile(`_(\d+)x(\d+)`)
-
-	var streamUrl *url.URL
-	sort.Slice(video.Variants, func(i, j int) bool {
-		return video.Variants[i].AverageBandwidth > video.Variants[j].AverageBandwidth
-	})
-
-	maxHeight := cfg.MVMax
-
-	for _, variant := range video.Variants {
-		matches := re.FindStringSubmatch(variant.URI)
-		if len(matches) == 3 {
-			height := matches[2]
-			var h int
-			_, err := fmt.Sscanf(height, "%d", &h)
-			if err != nil {
-				continue
-			}
-			if h <= maxHeight {
-				streamUrl, err = MediaUrl.Parse(variant.URI)
-				if err != nil {
-					return "", err
-				}
-				fmt.Println("Video: " + variant.Resolution + "-" + variant.VideoRange)
-				break
-			}
-		}
+	selectedVariant, dims, err := selectVideoVariant(video.Variants, cfg.MVMax, preference)
+	if err != nil {
+		return "", err
 	}
 
-	if streamUrl == nil {
-		return "", errors.New("no suitable video stream found")
+	streamUrl, err := MediaUrl.Parse(selectedVariant.URI)
+	if err != nil {
+		return "", err
+	}
+	videoRange := strings.TrimSpace(selectedVariant.VideoRange)
+	if videoRange != "" {
+		fmt.Printf("Video: %dx%d-%s\n", dims.Width, dims.Height, videoRange)
+	} else {
+		fmt.Printf("Video: %dx%d\n", dims.Width, dims.Height)
 	}
 
 	return streamUrl.String(), nil
@@ -3440,9 +3427,14 @@ func (b *TelegramBot) triggerAdminCachePush(chatID int64, replyToID int) {
 			defer b.endCachePush()
 			success := 0
 			failed := 0
+			retriedSuccess := 0
+			rateLimitedItems := make([]cachedAudioItem, 0)
 			for idx, item := range items {
 				if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, item.Entry, 0, item.TrackID); err != nil {
 					failed++
+					if isTelegramRateLimitError(err) {
+						rateLimitedItems = append(rateLimitedItems, item)
+					}
 					fmt.Printf("admin cache push failed idx=%d track=%s err=%v\n", idx+1, item.TrackID, err)
 					appendRuntimeErrorLogf("admin cache push failed idx=%d track=%s err=%v", idx+1, item.TrackID, err)
 				} else {
@@ -3452,7 +3444,27 @@ func (b *TelegramBot) triggerAdminCachePush(chatID int64, replyToID int) {
 					_ = b.sendMessageWithReply(chatID, fmt.Sprintf("缓存转存进度：%d/%d（成功 %d，失败 %d）", idx+1, total, success, failed), nil, 0)
 				}
 			}
-			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("缓存转存完成：成功 %d，失败 %d，目标群：%d", success, failed, targetChatID), nil, 0)
+			const retryRounds = 3
+			pendingRateLimited := rateLimitedItems
+			for round := 1; round <= retryRounds && len(pendingRateLimited) > 0; round++ {
+				_ = b.sendMessageWithReply(chatID, fmt.Sprintf("检测到 %d 条触发 429，开始第 %d/%d 轮重试。", len(pendingRateLimited), round, retryRounds), nil, 0)
+				nextRound := make([]cachedAudioItem, 0, len(pendingRateLimited))
+				for idx, item := range pendingRateLimited {
+					if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, item.Entry, 0, item.TrackID); err != nil {
+						fmt.Printf("admin cache push retry failed round=%d idx=%d track=%s err=%v\n", round, idx+1, item.TrackID, err)
+						appendRuntimeErrorLogf("admin cache push retry failed round=%d idx=%d track=%s err=%v", round, idx+1, item.TrackID, err)
+						if isTelegramRateLimitError(err) {
+							nextRound = append(nextRound, item)
+						}
+						continue
+					}
+					retriedSuccess++
+					success++
+					failed--
+				}
+				pendingRateLimited = nextRound
+			}
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("缓存转存完成：成功 %d，最终失败 %d，429重试补回 %d，目标群：%d", success, failed, retriedSuccess, targetChatID), nil, 0)
 		})
 	}()
 }
@@ -7127,8 +7139,7 @@ func (b *TelegramBot) augmentDownloadedPaths(paths []string, settings ChatDownlo
 		if normalized.AutoAnimated {
 			if _, ok := animatedDone[dir]; !ok {
 				animatedDone[dir] = struct{}{}
-				appendFile(filepath.Join(dir, "square_animated_artwork.mp4"))
-				appendFile(filepath.Join(dir, "tall_animated_artwork.mp4"))
+				appendFile(preferredAnimatedArtworkPath(dir))
 			}
 		}
 		if normalized.AutoLyrics && isAudioPath(path) {

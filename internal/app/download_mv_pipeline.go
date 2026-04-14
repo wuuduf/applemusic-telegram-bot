@@ -150,7 +150,7 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 		return errors.New("media-user-token may be wrong or expired")
 	}
 
-	videoM3U8URL, err := extractVideoWithConfig(mvm3u8URL, *ctx.cfg)
+	videoM3U8URL, err := extractVideoWithPreference(mvm3u8URL, *ctx.cfg, videoAspectLandscape)
 	if err != nil {
 		return fmt.Errorf("failed to resolve MV video stream: %w", err)
 	}

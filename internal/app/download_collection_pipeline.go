@@ -167,45 +167,55 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 		fmt.Println("Static cover download disabled by settings.")
 		return
 	}
-	if squareSource == "" {
+	if squareSource == "" && tallSource == "" {
 		fmt.Println(unavailableMsg)
 		return
 	}
 	fmt.Println("Found Animation Artwork.")
 
-	motionvideoURLSquare, err := extractVideoWithConfig(squareSource, *cfg)
-	if err != nil {
-		fmt.Println("no motion video square.\n", err)
-	} else {
-		exists := false
-		if session.shouldReuseExistingFiles() {
-			exists, err = fileExistsNonEmpty(filepath.Join(folderPath, "square_animated_artwork.mp4"))
-			if err != nil {
-				fmt.Println("Failed to check if animated artwork square exists.")
-			}
-		}
-		if exists {
-			fmt.Println("Animated artwork square already exists locally.")
+	squarePath := filepath.Join(folderPath, "square_animated_artwork.mp4")
+	squareReady := false
+	if squareSource != "" {
+		motionvideoURLSquare, err := extractVideoWithPreference(squareSource, *cfg, videoAspectSquare)
+		if err != nil {
+			fmt.Println("no motion video square.\n", err)
 		} else {
-			fmt.Println("Animation Artwork Square Downloading...")
-			if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", filepath.Join(folderPath, "square_animated_artwork.mp4")); err != nil {
-				fmt.Printf("animated artwork square dl err: %v\n", err)
+			exists := false
+			if session.shouldReuseExistingFiles() {
+				exists, err = fileExistsNonEmpty(squarePath)
+				if err != nil {
+					fmt.Println("Failed to check if animated artwork square exists.")
+				}
+			}
+			if exists {
+				fmt.Println("Animated artwork square already exists locally.")
+				squareReady = true
 			} else {
-				fmt.Println("Animation Artwork Square Downloaded")
+				fmt.Println("Animation Artwork Square Downloading...")
+				if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", squarePath); err != nil {
+					fmt.Printf("animated artwork square dl err: %v\n", err)
+				} else {
+					fmt.Println("Animation Artwork Square Downloaded")
+					squareReady = true
+				}
 			}
 		}
 	}
 
-	if cfg.EmbyAnimatedArtwork {
-		if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-i", filepath.Join(folderPath, "square_animated_artwork.mp4"), "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
+	if cfg.EmbyAnimatedArtwork && squareReady {
+		if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-i", squarePath, "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
 			fmt.Printf("animated artwork square to gif err: %v\n", err)
 		}
+	}
+
+	if squareReady {
+		return
 	}
 
 	if tallSource == "" {
 		return
 	}
-	motionvideoURLTall, err := extractVideoWithConfig(tallSource, *cfg)
+	motionvideoURLTall, err := extractVideoWithPreference(tallSource, *cfg, videoAspectPortrait)
 	if err != nil {
 		fmt.Println("no motion video tall.\n", err)
 		return

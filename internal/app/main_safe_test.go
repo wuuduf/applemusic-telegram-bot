@@ -1154,6 +1154,22 @@ func mustReceiveSendAudioCall[T any](t *testing.T, ch <-chan T) T {
 	}
 }
 
+func waitForMessageText(t *testing.T, ch <-chan string, match func(string) bool) string {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case text := <-ch:
+			if match(text) {
+				return text
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for matching message text")
+			return ""
+		}
+	}
+}
+
 func TestHandleMediaTransferQueuesArtistAssetsTask(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -1987,6 +2003,89 @@ func TestHandleCommandWithContextAmcachepushPushesCachedAudioInOrder(t *testing.
 	}
 	if first.Audio != "file-1" || second.Audio != "file-2" {
 		t.Fatalf("expected cache push to follow CreatedAt order, got first=%+v second=%+v", first, second)
+	}
+}
+
+func TestTriggerAdminCachePushRetriesRateLimitedItems(t *testing.T) {
+	type sendAudioCall struct {
+		ChatID int64
+		Audio  string
+	}
+	audioCalls := make(chan sendAudioCall, 8)
+	messageTexts := make(chan string, 8)
+	var rateLimitedCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			call := sendAudioCall{
+				ChatID: int64(payload["chat_id"].(float64)),
+				Audio:  payload["audio"].(string),
+			}
+			audioCalls <- call
+			if call.Audio == "file-1" && rateLimitedCount.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":false,"description":"Too Many Requests","parameters":{"retry_after":1}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"cache-file","file_size":123}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			if text, _ := payload["text"].(string); text != "" {
+				messageTexts <- text
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		forwardChatID: -1001234567890,
+		cache: map[string]CachedAudio{
+			"track-1|alac|false": {
+				FileID:         "file-1",
+				FileSize:       111,
+				Format:         telegramFormatAlac,
+				BitrateKbps:    320,
+				DurationMillis: 1000,
+				Title:          "Song 1",
+				Performer:      "Artist 1",
+				AlbumName:      "Album 1",
+				GenreNames:     []string{"Rock"},
+				Storefront:     "us",
+				CreatedAt:      time.Now(),
+			},
+		},
+	}
+
+	bot.triggerAdminCachePush(42, 0)
+
+	first := mustReceiveSendAudioCall(t, audioCalls)
+	second := mustReceiveSendAudioCall(t, audioCalls)
+	if first.Audio != "file-1" || second.Audio != "file-1" {
+		t.Fatalf("expected the same rate-limited audio to be retried, got first=%+v second=%+v", first, second)
+	}
+
+	summary := waitForMessageText(t, messageTexts, func(text string) bool {
+		return strings.Contains(text, "缓存转存完成")
+	})
+	if !strings.Contains(summary, "成功 1") || !strings.Contains(summary, "最终失败 0") || !strings.Contains(summary, "429重试补回 1") {
+		t.Fatalf("expected retry summary, got %q", summary)
 	}
 }
 

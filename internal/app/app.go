@@ -74,6 +74,7 @@ const maxTemplateValueBytes = 240
 
 type AudioMeta struct {
 	TrackID        string
+	VariantKey     string
 	Title          string
 	Performer      string
 	DurationMillis int64
@@ -1088,7 +1089,7 @@ func Main() {
 					mvSaveDir = session.Config.AlacSaveFolder
 				}
 				storefront, albumId = checkUrlMv(urlRaw)
-				err := mvDownloader(session, albumId, mvSaveDir, token, storefront, session.Config.MediaUserToken, nil)
+				err := mvDownloader(session, albumId, mvSaveDir, token, storefront, session.Config.MediaUserToken, nil, "", "", "")
 				if err != nil {
 					fmt.Println("\u26A0 Failed to dl MV:", err)
 					session.Counter.Error++
@@ -1744,6 +1745,9 @@ type TelegramBot struct {
 	transferMu       sync.Mutex
 	pendingTransfers map[int64]map[int]*PendingTransfer
 
+	mvStreamMu       sync.Mutex
+	pendingMVStreams map[int64]map[int]*PendingMVStream
+
 	artistModeMu       sync.Mutex
 	pendingArtistModes map[int64]map[int]*PendingArtistMode
 
@@ -1823,6 +1827,27 @@ type PendingTransfer struct {
 	CreatedAt        time.Time
 }
 
+type MusicVideoStreamOption struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	PlaylistURL string `json:"playlist_url"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	VideoRange  string `json:"video_range,omitempty"`
+	Bandwidth   uint32 `json:"bandwidth,omitempty"`
+}
+
+type PendingMVStream struct {
+	MediaID          string                   `json:"media_id"`
+	MediaName        string                   `json:"media_name,omitempty"`
+	Storefront       string                   `json:"storefront"`
+	ForceRefresh     bool                     `json:"force_refresh,omitempty"`
+	ReplyToMessageID int                      `json:"reply_to_message_id,omitempty"`
+	MessageID        int                      `json:"message_id"`
+	CreatedAt        time.Time                `json:"created_at"`
+	Options          []MusicVideoStreamOption `json:"options,omitempty"`
+}
+
 type PendingArtistMode struct {
 	ArtistID         string
 	ArtistName       string
@@ -1842,6 +1867,9 @@ type downloadRequest struct {
 	transferMode string
 	mediaType    string
 	mediaID      string
+	mvVariantKey string
+	mvVariantURL string
+	mvVariantTag string
 	storefront   string
 	inflightKey  string
 	requestID    string
@@ -2592,6 +2620,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		chatSettings:            make(map[int64]ChatDownloadSettings),
 		pending:                 make(map[int64]map[int]*PendingSelection),
 		pendingTransfers:        make(map[int64]map[int]*PendingTransfer),
+		pendingMVStreams:        make(map[int64]map[int]*PendingMVStream),
 		pendingArtistModes:      make(map[int64]map[int]*PendingArtistMode),
 		downloadQueue:           make(chan *downloadRequest, queueSize),
 		workerLimit:             defaultTaskWorkerLimit,
@@ -3294,6 +3323,11 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 		if n, err := strconv.Atoi(numStr); err == nil {
 			b.handleSelection(cb.Message.Chat.ID, cb.Message.MessageID, n)
 		}
+	} else if strings.HasPrefix(data, "mvstream:") {
+		numStr := strings.TrimPrefix(data, "mvstream:")
+		if n, err := strconv.Atoi(numStr); err == nil {
+			b.handleMusicVideoStreamSelection(cb.Message.Chat.ID, cb.Message.MessageID, n)
+		}
 	} else if strings.HasPrefix(data, "setting_format:") {
 		format := strings.TrimPrefix(data, "setting_format:")
 		settings := b.setChatFormat(cb.Message.Chat.ID, format)
@@ -3479,6 +3513,7 @@ func (b *TelegramBot) cancelPanelAndDelete(chatID int64, messageID int) {
 func (b *TelegramBot) clearPanelStateByMessage(chatID int64, messageID int) {
 	b.clearPendingByMessage(chatID, messageID)
 	b.clearPendingTransferByMessage(chatID, messageID)
+	b.clearPendingMVStreamByMessage(chatID, messageID)
 	b.clearPendingArtistModeByMessage(chatID, messageID)
 }
 
@@ -6031,44 +6066,11 @@ func (b *TelegramBot) queueDownloadMusicVideoWithReply(chatID int64, mvID string
 }
 
 func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID string, storefront string, replyToID int, forceRefresh bool) {
-	normalizedID, idErr := normalizeMediaIdentifier(mediaTypeMusicVideo, mvID)
-	if idErr != nil {
-		_ = b.sendMessageWithReply(chatID, "Music Video ID is invalid.", nil, replyToID)
+	normalizedID, storefront, ok := b.validateMusicVideoRequest(chatID, mvID, storefront, replyToID)
+	if !ok {
 		return
 	}
-	if normalizedID == "" {
-		_ = b.sendMessage(chatID, "Music Video ID is empty.", nil)
-		return
-	}
-	if len(strings.TrimSpace(Config.MediaUserToken)) <= 50 {
-		_ = b.sendMessageWithReply(chatID, "MV download requires media-user-token in config.yaml.", nil, replyToID)
-		return
-	}
-	if _, err := exec.LookPath("mp4decrypt"); err != nil {
-		_ = b.sendMessageWithReply(chatID, "MV download requires mp4decrypt in PATH.", nil, replyToID)
-		return
-	}
-	settings := b.getChatSettings(chatID)
-	if !forceRefresh && b.trySendCachedMusicVideo(chatID, replyToID, normalizedID, settings) {
-		return
-	}
-	if storefront == "" {
-		storefront = Config.Storefront
-	}
-	saveDir := strings.TrimSpace(Config.AlacSaveFolder)
-	if saveDir == "" {
-		saveDir = "AM-DL downloads"
-	}
-	inflightKey := makeDownloadInflightKey(chatID, mediaTypeMusicVideo, normalizedID, storefront, transferModeOneByOne, settings)
-	if !b.acquireInflightDownload(inflightKey) {
-		_ = b.sendMessageWithReply(chatID, "Same MV task is already running for this chat. Please wait.", nil, replyToID)
-		return
-	}
-	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferModeOneByOne, mediaTypeMusicVideo, normalizedID, storefront, inflightKey, func(session *DownloadSession) error {
-		return mvDownloader(session, normalizedID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
-	}); !queued {
-		b.releaseInflightDownload(inflightKey)
-	}
+	b.promptMusicVideoStreamSelection(chatID, normalizedID, storefront, replyToID, forceRefresh)
 }
 
 func (b *TelegramBot) promptMediaTransfer(chatID int64, mediaType string, mediaID string, storefront string, mediaName string, replyToID int, forceRefresh bool) {
@@ -6158,7 +6160,7 @@ func (b *TelegramBot) buildQueuedRequestRunner(req *downloadRequest) error {
 	case telegramTaskDownload:
 		req.transferMode = normalizeTransferModeForMedia(req.transferMode, req.mediaType, req.single)
 		if req.fn == nil {
-			fn, err := b.buildDownloadWorkerFn(req.mediaType, req.mediaID, req.storefront, req.transferMode)
+			fn, err := b.buildDownloadWorkerFn(req.mediaType, req.mediaID, req.storefront, req.transferMode, req.mvVariantURL, req.mvVariantKey, req.mvVariantTag)
 			if err != nil {
 				return err
 			}
@@ -6374,18 +6376,18 @@ func (b *TelegramBot) trySendCachedBundleZip(chatID int64, mediaType string, med
 	return true
 }
 
-func (b *TelegramBot) trySendCachedMusicVideo(chatID int64, replyToID int, mvID string, settings ChatDownloadSettings) bool {
+func (b *TelegramBot) trySendCachedMusicVideo(chatID int64, replyToID int, mvID string, settings ChatDownloadSettings, variantKey string) bool {
 	if mvID == "" {
 		return false
 	}
-	videoKey := b.mvCacheKey(mvID, settings, "video")
+	videoKey := b.mvCacheKey(mvID, settings, variantKey, "video")
 	if entry, ok := b.getCachedVideo(videoKey); ok {
 		if err := b.sendVideoByFileID(chatID, entry, replyToID); err == nil {
 			return true
 		}
 		b.deleteCachedVideo(videoKey)
 	}
-	documentKey := b.mvCacheKey(mvID, settings, "document")
+	documentKey := b.mvCacheKey(mvID, settings, variantKey, "document")
 	if entry, ok := b.getCachedDocument(documentKey); ok {
 		if err := b.sendDocumentByFileID(chatID, entry, replyToID); err == nil {
 			return true

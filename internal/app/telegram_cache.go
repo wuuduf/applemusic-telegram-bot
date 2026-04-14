@@ -44,8 +44,12 @@ func (b *TelegramBot) bundleZipCacheKey(mediaType, mediaID string, settings Chat
 	return fmt.Sprintf("%s:%s|%s|zip", mediaType, mediaID, cacheProfileKey(settings))
 }
 
-func (b *TelegramBot) mvCacheKey(mvID string, settings ChatDownloadSettings, mode string) string {
-	return fmt.Sprintf("%s:%s|%s|%s", mediaTypeMusicVideo, mvID, cacheProfileKey(settings), mode)
+func (b *TelegramBot) mvCacheKey(mvID string, settings ChatDownloadSettings, variantKey string, mode string) string {
+	selector := strings.TrimSpace(variantKey)
+	if selector == "" {
+		selector = "auto"
+	}
+	return fmt.Sprintf("%s:%s|vk:%s|%s|%s", mediaTypeMusicVideo, mvID, selector, cacheProfileKey(settings), mode)
 }
 
 func (b *TelegramBot) loadCache() {

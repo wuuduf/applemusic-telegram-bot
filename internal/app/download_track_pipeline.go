@@ -110,7 +110,7 @@ func handleTrackMusicVideoStage(session *DownloadSession, track *task.Track, tok
 		session.Counter.Error++
 		return
 	}
-	if err := mvDownloader(session, track.ID, track.SaveDir, token, track.Storefront, mediaUserToken, track); err != nil {
+	if err := mvDownloader(session, track.ID, track.SaveDir, token, track.Storefront, mediaUserToken, track, "", "", ""); err != nil {
 		fmt.Println("⚠ Failed to dl MV:", err)
 		session.Counter.Error++
 		return

@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -186,6 +189,115 @@ func preferredAnimatedArtworkPath(dir string) string {
 		return tall
 	}
 	return ""
+}
+
+func listMusicVideoStreamOptions(masterURL string) ([]MusicVideoStreamOption, error) {
+	mediaURL, err := url.Parse(masterURL)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := networkHTTPClient.Get(masterURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	from, listType, err := m3u8.DecodeFrom(strings.NewReader(string(body)), true)
+	if err != nil || listType != m3u8.MASTER {
+		return nil, fmt.Errorf("m3u8 not of media type")
+	}
+	return buildMusicVideoStreamOptions(mediaURL, from.(*m3u8.MasterPlaylist).Variants), nil
+}
+
+func buildMusicVideoStreamOptions(baseURL *url.URL, variants []*m3u8.Variant) []MusicVideoStreamOption {
+	candidates := buildVideoVariantCandidates(variants)
+	type groupedCandidate struct {
+		videoVariantCandidate
+		AbsoluteURL string
+	}
+	grouped := make(map[string]groupedCandidate)
+	for _, candidate := range candidates {
+		if candidate.Variant == nil || strings.TrimSpace(candidate.Variant.URI) == "" || baseURL == nil {
+			continue
+		}
+		absoluteURL, err := baseURL.Parse(candidate.Variant.URI)
+		if err != nil {
+			continue
+		}
+		rangeKey := normalizeVideoRange(candidate.Variant.VideoRange)
+		groupKey := fmt.Sprintf("%dx%d|%s", candidate.Dimensions.Width, candidate.Dimensions.Height, rangeKey)
+		current, exists := grouped[groupKey]
+		replacement := groupedCandidate{
+			videoVariantCandidate: candidate,
+			AbsoluteURL:           absoluteURL.String(),
+		}
+		if !exists || candidate.Bandwidth > current.Bandwidth || (candidate.Bandwidth == current.Bandwidth && strings.Compare(replacement.AbsoluteURL, current.AbsoluteURL) < 0) {
+			grouped[groupKey] = replacement
+		}
+	}
+	ordered := make([]groupedCandidate, 0, len(grouped))
+	for _, candidate := range grouped {
+		ordered = append(ordered, candidate)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Quality != ordered[j].Quality {
+			return ordered[i].Quality > ordered[j].Quality
+		}
+		if ordered[i].Area != ordered[j].Area {
+			return ordered[i].Area > ordered[j].Area
+		}
+		if ordered[i].Bandwidth != ordered[j].Bandwidth {
+			return ordered[i].Bandwidth > ordered[j].Bandwidth
+		}
+		return strings.Compare(ordered[i].AbsoluteURL, ordered[j].AbsoluteURL) < 0
+	})
+	options := make([]MusicVideoStreamOption, 0, len(ordered))
+	for _, candidate := range ordered {
+		rangeKey := normalizeVideoRange(candidate.Variant.VideoRange)
+		options = append(options, MusicVideoStreamOption{
+			Key:         buildMusicVideoStreamKey(candidate.AbsoluteURL, candidate.Dimensions, rangeKey),
+			Label:       formatMusicVideoStreamLabel(candidate.Dimensions, candidate.Bandwidth, rangeKey),
+			PlaylistURL: candidate.AbsoluteURL,
+			Width:       candidate.Dimensions.Width,
+			Height:      candidate.Dimensions.Height,
+			VideoRange:  rangeKey,
+			Bandwidth:   candidate.Bandwidth,
+		})
+	}
+	return options
+}
+
+func normalizeVideoRange(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == "" {
+		return "SDR"
+	}
+	return value
+}
+
+func formatMusicVideoStreamLabel(dims videoVariantDimensions, bandwidth uint32, videoRange string) string {
+	parts := []string{fmt.Sprintf("%dx%d", dims.Width, dims.Height)}
+	if strings.TrimSpace(videoRange) != "" {
+		parts = append(parts, strings.ToUpper(strings.TrimSpace(videoRange)))
+	}
+	if bandwidth > 0 {
+		parts = append(parts, fmt.Sprintf("%dk", bandwidth/1000))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func buildMusicVideoStreamKey(_ string, dims videoVariantDimensions, videoRange string) string {
+	rangePart := strings.ToLower(strings.TrimSpace(videoRange))
+	if rangePart == "" {
+		rangePart = "sdr"
+	}
+	return fmt.Sprintf("%dx%d-%s", dims.Width, dims.Height, rangePart)
 }
 
 func minInt(a, b int) int {

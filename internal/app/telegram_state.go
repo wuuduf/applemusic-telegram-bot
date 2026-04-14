@@ -24,6 +24,9 @@ type telegramPersistedRequest struct {
 	TransferMode string               `json:"transfer_mode"`
 	MediaType    string               `json:"media_type"`
 	MediaID      string               `json:"media_id"`
+	MVVariantKey string               `json:"mv_variant_key,omitempty"`
+	MVVariantURL string               `json:"mv_variant_url,omitempty"`
+	MVVariantTag string               `json:"mv_variant_tag,omitempty"`
 	Storefront   string               `json:"storefront"`
 	InflightKey  string               `json:"inflight_key"`
 	State        string               `json:"state"`
@@ -42,6 +45,7 @@ type telegramPersistedState struct {
 	SavedAt              time.Time                           `json:"saved_at"`
 	Pending              map[int64]map[int]PendingSelection  `json:"pending,omitempty"`
 	PendingTransfers     map[int64]map[int]PendingTransfer   `json:"pending_transfers,omitempty"`
+	PendingMVStreams     map[int64]map[int]PendingMVStream   `json:"pending_mv_streams,omitempty"`
 	PendingArtistModes   map[int64]map[int]PendingArtistMode `json:"pending_artist_modes,omitempty"`
 	Requests             []telegramPersistedRequest          `json:"requests,omitempty"`
 	InflightKeys         []string                            `json:"inflight_keys,omitempty"`
@@ -151,6 +155,9 @@ func (b *TelegramBot) trackQueuedRequest(req *downloadRequest) {
 		TransferMode: req.transferMode,
 		MediaType:    req.mediaType,
 		MediaID:      req.mediaID,
+		MVVariantKey: strings.TrimSpace(req.mvVariantKey),
+		MVVariantURL: strings.TrimSpace(req.mvVariantURL),
+		MVVariantTag: strings.TrimSpace(req.mvVariantTag),
 		Storefront:   req.storefront,
 		InflightKey:  req.inflightKey,
 		State:        "queued",
@@ -241,6 +248,7 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 		SavedAt:            time.Now(),
 		Pending:            make(map[int64]map[int]PendingSelection),
 		PendingTransfers:   make(map[int64]map[int]PendingTransfer),
+		PendingMVStreams:   make(map[int64]map[int]PendingMVStream),
 		PendingArtistModes: make(map[int64]map[int]PendingArtistMode),
 		Requests:           []telegramPersistedRequest{},
 		InflightKeys:       []string{},
@@ -286,6 +294,26 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 		}
 	}
 	b.transferMu.Unlock()
+
+	b.mvStreamMu.Lock()
+	for chatID, pendingMap := range b.pendingMVStreams {
+		if len(pendingMap) == 0 {
+			continue
+		}
+		cloned := make(map[int]PendingMVStream, len(pendingMap))
+		for messageID, pending := range pendingMap {
+			if pending == nil {
+				continue
+			}
+			value := *pending
+			value.Options = append([]MusicVideoStreamOption{}, pending.Options...)
+			cloned[messageID] = value
+		}
+		if len(cloned) > 0 {
+			state.PendingMVStreams[chatID] = cloned
+		}
+	}
+	b.mvStreamMu.Unlock()
 
 	b.artistModeMu.Lock()
 	for chatID, pendingMap := range b.pendingArtistModes {
@@ -362,6 +390,9 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	if len(state.PendingTransfers) == 0 {
 		state.PendingTransfers = nil
 	}
+	if len(state.PendingMVStreams) == 0 {
+		state.PendingMVStreams = nil
+	}
 	if len(state.PendingArtistModes) == 0 {
 		state.PendingArtistModes = nil
 	}
@@ -436,6 +467,24 @@ func (b *TelegramBot) restoreRuntimeState() {
 		}
 	}
 	b.transferMu.Unlock()
+
+	b.mvStreamMu.Lock()
+	b.pendingMVStreams = make(map[int64]map[int]*PendingMVStream)
+	for chatID, pendingMap := range state.PendingMVStreams {
+		if len(pendingMap) == 0 {
+			continue
+		}
+		target := make(map[int]*PendingMVStream, len(pendingMap))
+		for messageID, pending := range pendingMap {
+			value := pending
+			value.Options = append([]MusicVideoStreamOption{}, pending.Options...)
+			target[messageID] = &value
+		}
+		if len(target) > 0 {
+			b.pendingMVStreams[chatID] = target
+		}
+	}
+	b.mvStreamMu.Unlock()
 
 	b.artistModeMu.Lock()
 	b.pendingArtistModes = make(map[int64]map[int]*PendingArtistMode)
@@ -614,6 +663,9 @@ func (b *TelegramBot) buildRecoveredDownloadRequest(request telegramPersistedReq
 		transferMode: request.TransferMode,
 		mediaType:    mediaType,
 		mediaID:      mediaID,
+		mvVariantKey: strings.TrimSpace(request.MVVariantKey),
+		mvVariantURL: strings.TrimSpace(request.MVVariantURL),
+		mvVariantTag: strings.TrimSpace(request.MVVariantTag),
 		storefront:   storefront,
 		inflightKey:  strings.TrimSpace(request.InflightKey),
 		requestID:    strings.TrimSpace(request.RequestID),
@@ -627,7 +679,7 @@ func (b *TelegramBot) buildRecoveredDownloadRequest(request telegramPersistedReq
 	return req, nil
 }
 
-func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, storefront string, transferMode string) (func(session *DownloadSession) error, error) {
+func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, storefront string, transferMode string, mvVariantURL string, mvVariantKey string, mvVariantTag string) (func(session *DownloadSession) error, error) {
 	switch mediaType {
 	case mediaTypeSong:
 		return func(session *DownloadSession) error {
@@ -659,7 +711,7 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 			saveDir = "AM-DL downloads"
 		}
 		return func(session *DownloadSession) error {
-			return mvDownloader(session, mediaID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil)
+			return mvDownloader(session, mediaID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil, mvVariantURL, mvVariantKey, mvVariantTag)
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported media type: %s", mediaType)

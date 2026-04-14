@@ -25,14 +25,17 @@ type musicVideoDownloadContext struct {
 	resp           *ampapi.MusicVideoRespData
 	genre          string
 	mvSaveName     string
+	variantKey     string
+	variantTag     string
+	selectedVideo  string
 	videoPath      string
 	audioPath      string
 	outputPath     string
 	coverPath      string
 }
 
-func mvDownloader(session *DownloadSession, adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track) error {
-	ctx, err := resolveMusicVideoMediaStage(session, adamID, saveDir, token, storefront, mediaUserToken, track)
+func mvDownloader(session *DownloadSession, adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track, selectedVideoURL string, variantKey string, variantTag string) error {
+	ctx, err := resolveMusicVideoMediaStage(session, adamID, saveDir, token, storefront, mediaUserToken, track, selectedVideoURL, variantKey, variantTag)
 	if err != nil {
 		return err
 	}
@@ -51,7 +54,7 @@ func mvDownloader(session *DownloadSession, adamID string, saveDir string, token
 	return postProcessMusicVideoStage(ctx)
 }
 
-func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track) (*musicVideoDownloadContext, error) {
+func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track, selectedVideoURL string, variantKey string, variantTag string) (*musicVideoDownloadContext, error) {
 	if session == nil {
 		return nil, fmt.Errorf("download session is nil")
 	}
@@ -80,11 +83,16 @@ func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDi
 	if track != nil {
 		mvSaveName = fmt.Sprintf("%02d. %s", track.TaskNum, mvData.Attributes.Name)
 	}
-	videoPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s_vid.mp4", normalizedMediaID))
+	fileSuffix := ""
+	if strings.TrimSpace(variantKey) != "" {
+		fileSuffix = "_" + sanitizeFileBaseName(strings.TrimSpace(variantKey))
+		mvSaveName = mvSaveName + " [" + sanitizeFileBaseName(strings.TrimSpace(variantKey)) + "]"
+	}
+	videoPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s%s_vid.mp4", normalizedMediaID, fileSuffix))
 	if err != nil {
 		return nil, fmt.Errorf("invalid mv video path: %w", err)
 	}
-	audioPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s_aud.mp4", normalizedMediaID))
+	audioPath, err := joinFileWithinRoot(saveDir, fmt.Sprintf("%s%s_aud.mp4", normalizedMediaID, fileSuffix))
 	if err != nil {
 		return nil, fmt.Errorf("invalid mv audio path: %w", err)
 	}
@@ -104,6 +112,9 @@ func resolveMusicVideoMediaStage(session *DownloadSession, adamID string, saveDi
 		resp:           mvData,
 		genre:          mvGenre,
 		mvSaveName:     mvSaveName,
+		variantKey:     strings.TrimSpace(variantKey),
+		variantTag:     strings.TrimSpace(variantTag),
+		selectedVideo:  strings.TrimSpace(selectedVideoURL),
 		videoPath:      videoPath,
 		audioPath:      audioPath,
 		outputPath:     outputPath,
@@ -122,6 +133,7 @@ func handleExistingMusicVideoStage(ctx *musicVideoDownloadContext) bool {
 	fmt.Println("MV already exists locally.")
 	meta := AudioMeta{
 		TrackID:        ctx.mediaID,
+		VariantKey:     ctx.variantKey,
 		Title:          strings.TrimSpace(ctx.resp.Attributes.Name),
 		Performer:      strings.TrimSpace(ctx.resp.Attributes.ArtistName),
 		DurationMillis: int64(ctx.resp.Attributes.DurationInMillis),
@@ -150,9 +162,14 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 		return errors.New("media-user-token may be wrong or expired")
 	}
 
-	videoM3U8URL, err := extractVideoWithPreference(mvm3u8URL, *ctx.cfg, videoAspectLandscape)
-	if err != nil {
-		return fmt.Errorf("failed to resolve MV video stream: %w", err)
+	videoM3U8URL := strings.TrimSpace(ctx.selectedVideo)
+	if videoM3U8URL == "" {
+		videoM3U8URL, err = extractVideoWithPreference(mvm3u8URL, *ctx.cfg, videoAspectLandscape)
+		if err != nil {
+			return fmt.Errorf("failed to resolve MV video stream: %w", err)
+		}
+	} else if ctx.variantTag != "" {
+		fmt.Printf("Video: %s\n", ctx.variantTag)
 	}
 	if strings.TrimSpace(videoM3U8URL) == "" {
 		return errors.New("failed to resolve MV video stream")
@@ -267,6 +284,7 @@ func postProcessMusicVideoStage(ctx *musicVideoDownloadContext) error {
 
 	meta := AudioMeta{
 		TrackID:        ctx.mediaID,
+		VariantKey:     ctx.variantKey,
 		Title:          strings.TrimSpace(ctx.resp.Attributes.Name),
 		Performer:      strings.TrimSpace(ctx.resp.Attributes.ArtistName),
 		DurationMillis: int64(ctx.resp.Attributes.DurationInMillis),

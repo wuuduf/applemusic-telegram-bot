@@ -345,8 +345,8 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 	videoCacheKey := ""
 	documentCacheKey := ""
 	if meta.TrackID != "" {
-		videoCacheKey = b.mvCacheKey(meta.TrackID, settings, "video")
-		documentCacheKey = b.mvCacheKey(meta.TrackID, settings, "document")
+		videoCacheKey = b.mvCacheKey(meta.TrackID, settings, meta.VariantKey, "video")
+		documentCacheKey = b.mvCacheKey(meta.TrackID, settings, meta.VariantKey, "document")
 	}
 	if status != nil {
 		status.Update("Uploading video", 0, 0)

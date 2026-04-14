@@ -1,6 +1,7 @@
 package app
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,5 +52,47 @@ func TestPreferredAnimatedArtworkPathPrefersSquare(t *testing.T) {
 
 	if got := preferredAnimatedArtworkPath(dir); got != square {
 		t.Fatalf("expected square artwork path, got %q", got)
+	}
+}
+
+func TestBuildMusicVideoStreamOptionsDeduplicatesResolutionAndRange(t *testing.T) {
+	baseURL, err := url.Parse("https://example.com/master.m3u8")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	options := buildMusicVideoStreamOptions(baseURL, []*m3u8.Variant{
+		{
+			URI: "a/1920x1080_sdr.m3u8",
+			VariantParams: m3u8.VariantParams{
+				Resolution:       "1920x1080",
+				AverageBandwidth: 5000000,
+				VideoRange:       "SDR",
+			},
+		},
+		{
+			URI: "b/1920x1080_sdr_better.m3u8",
+			VariantParams: m3u8.VariantParams{
+				Resolution:       "1920x1080",
+				AverageBandwidth: 6000000,
+				VideoRange:       "SDR",
+			},
+		},
+		{
+			URI: "c/1920x1080_hdr.m3u8",
+			VariantParams: m3u8.VariantParams{
+				Resolution:       "1920x1080",
+				AverageBandwidth: 7000000,
+				VideoRange:       "HDR",
+			},
+		},
+	})
+	if len(options) != 2 {
+		t.Fatalf("expected 2 deduplicated options, got %d", len(options))
+	}
+	if options[0].VideoRange != "HDR" {
+		t.Fatalf("expected HDR option first, got %#v", options[0])
+	}
+	if options[1].PlaylistURL != "https://example.com/b/1920x1080_sdr_better.m3u8" {
+		t.Fatalf("expected highest bandwidth SDR url, got %q", options[1].PlaylistURL)
 	}
 }

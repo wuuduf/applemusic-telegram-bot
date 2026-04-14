@@ -98,6 +98,10 @@ type CachedAudio struct {
 	DurationMillis int64     `json:"duration_millis,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Performer      string    `json:"performer,omitempty"`
+	AlbumName      string    `json:"album_name,omitempty"`
+	GenreNames     []string  `json:"genre_names,omitempty"`
+	Storefront     string    `json:"storefront,omitempty"`
+	CreatedAt      time.Time `json:"created_at,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 }
 
@@ -1721,20 +1725,28 @@ func applyTelegramAudioEmbeddingPolicy(session *DownloadSession, settings ChatDo
 }
 
 type TelegramBot struct {
-	token        string
-	apiBase      string
-	proxyInfo    string
-	appleToken   string
-	client       *http.Client
-	pollClient   *http.Client
-	allowedChats map[int64]bool
-	searchLimit  int
-	maxFileBytes int64
-	errorLogFile string
+	token         string
+	apiBase       string
+	proxyInfo     string
+	appleToken    string
+	client        *http.Client
+	pollClient    *http.Client
+	allowedChats  map[int64]bool
+	adminUsers    map[int64]bool
+	forwardChatID int64
+	searchLimit   int
+	maxFileBytes  int64
+	errorLogFile  string
 
 	getUpdatesErrorDelay    time.Duration
 	getUpdatesConflictDelay time.Duration
 	getUpdatesRestartAfter  int
+
+	accessMu             sync.RWMutex
+	userWhitelistEnabled bool
+	userWhitelist        map[int64]bool
+	userBlacklist        map[int64]bool
+	forwardEnabled       bool
 
 	settingsMu   sync.Mutex
 	chatSettings map[int64]ChatDownloadSettings
@@ -1792,6 +1804,9 @@ type TelegramBot struct {
 
 	songCommentMu    sync.Mutex
 	songCommentCache map[string]songCommentCacheEntry
+
+	adminTaskMu      sync.Mutex
+	cachePushRunning bool
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -1855,10 +1870,11 @@ type Update struct {
 }
 
 type Message struct {
-	MessageID int    `json:"message_id"`
-	From      *User  `json:"from,omitempty"`
-	Chat      Chat   `json:"chat"`
-	Text      string `json:"text,omitempty"`
+	MessageID      int      `json:"message_id"`
+	From           *User    `json:"from,omitempty"`
+	Chat           Chat     `json:"chat"`
+	Text           string   `json:"text,omitempty"`
+	ReplyToMessage *Message `json:"reply_to_message,omitempty"`
 }
 
 type CallbackQuery struct {
@@ -2520,11 +2536,20 @@ func telegramSendChatInterval() time.Duration {
 	return defaultTelegramSendChatInterval
 }
 
-func newTelegramBot(token, appleToken string) *TelegramBot {
-	allowed := make(map[int64]bool)
-	for _, id := range Config.TelegramAllowedChatIDs {
-		allowed[id] = true
+func buildIDSet(ids []int64) map[int64]bool {
+	result := make(map[int64]bool)
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		result[id] = true
 	}
+	return result
+}
+
+func newTelegramBot(token, appleToken string) *TelegramBot {
+	allowed := buildIDSet(Config.TelegramAllowedChatIDs)
+	admins := buildIDSet(Config.TelegramAdminUserIDs)
 	searchLimit := Config.TelegramSearchLimit
 	if searchLimit <= 0 {
 		searchLimit = defaultSearchLimit
@@ -2565,12 +2590,18 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		client:                  newTelegramHTTPClient(apiTimeout, proxyFunc),
 		pollClient:              newTelegramHTTPClient(pollTimeout, proxyFunc),
 		allowedChats:            allowed,
+		adminUsers:              admins,
+		forwardChatID:           Config.TelegramForwardChatID,
 		searchLimit:             searchLimit,
 		maxFileBytes:            maxFileBytes,
 		errorLogFile:            resolveTelegramErrorLogFile(cacheFile, stateFile),
 		getUpdatesErrorDelay:    defaultTelegramGetUpdatesErrorSleep,
 		getUpdatesConflictDelay: defaultTelegramGetUpdatesConflictSleep,
 		getUpdatesRestartAfter:  defaultTelegramGetUpdatesRestartThreshold,
+		userWhitelistEnabled:    Config.TelegramUserWhitelistEnabled,
+		userWhitelist:           make(map[int64]bool),
+		userBlacklist:           make(map[int64]bool),
+		forwardEnabled:          Config.TelegramForwardEnabled,
 		chatSettings:            make(map[int64]ChatDownloadSettings),
 		pending:                 make(map[int64]map[int]*PendingSelection),
 		pendingTransfers:        make(map[int64]map[int]*PendingTransfer),
@@ -3208,19 +3239,34 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 	}
 	text := strings.TrimSpace(msg.Text)
 	if cmd, args, ok := parseCommand(text); ok {
+		cmd = normalizeTelegramBotCommand(cmd)
 		if !b.isAllowedChat(msg.Chat.ID) {
 			// Allow querying chat_id even when not in allowlist.
 			if cmd == "id" && len(args) == 0 {
 				_ = b.sendMessage(msg.Chat.ID, b.formatChatIDTextForChat(msg.Chat.ID), nil)
+			} else if cmd == "amwhoami" && len(args) == 0 {
+				_ = b.sendMessage(msg.Chat.ID, formatWhoAmIText(messageUserID(msg), msg.Chat.ID), nil)
 			} else {
 				_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 			}
 			return
 		}
-		b.handleCommand(msg.Chat.ID, msg.Chat.Type, cmd, args, msg.MessageID)
+		if !b.isAllowedUser(messageUserID(msg)) {
+			if cmd == "amwhoami" && len(args) == 0 {
+				_ = b.sendMessage(msg.Chat.ID, formatWhoAmIText(messageUserID(msg), msg.Chat.ID), nil)
+			} else {
+				_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
+			}
+			return
+		}
+		b.handleCommandWithContext(msg.Chat.ID, msg.Chat.Type, messageUserID(msg), cmd, args, msg.MessageID, msg.ReplyToMessage)
 		return
 	}
 	if !b.isAllowedChat(msg.Chat.ID) {
+		_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
+		return
+	}
+	if !b.isAllowedUser(messageUserID(msg)) {
 		_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 		return
 	}
@@ -3240,11 +3286,17 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	if cb == nil || cb.Message == nil {
 		return
 	}
-	if !b.isAllowedChat(cb.Message.Chat.ID) {
+	if !b.isAllowedChat(cb.Message.Chat.ID) || !b.isAllowedUser(callbackUserID(cb)) {
+		_ = b.answerCallbackQuery(cb.ID)
 		return
 	}
 	b.markMessageInteraction(cb.Message.Chat.ID, cb.Message.MessageID)
 	data := strings.TrimSpace(cb.Data)
+	if strings.HasPrefix(data, "admin:") {
+		b.handleAdminCallback(cb)
+		_ = b.answerCallbackQuery(cb.ID)
+		return
+	}
 	if data == "panel_cancel" || data == "setting_exit" || data == "setting_close" {
 		b.cancelPanelAndDelete(cb.Message.Chat.ID, cb.Message.MessageID)
 		_ = b.answerCallbackQuery(cb.ID)
@@ -3328,6 +3380,83 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	_ = b.answerCallbackQuery(cb.ID)
 }
 
+func (b *TelegramBot) handleAdminCallback(cb *CallbackQuery) {
+	if b == nil || cb == nil || cb.Message == nil {
+		return
+	}
+	chatID := cb.Message.Chat.ID
+	messageID := cb.Message.MessageID
+	userID := callbackUserID(cb)
+	if !b.isAdminUser(userID) {
+		_ = b.sendMessageWithReply(chatID, "只有管理员可以操作管理员面板。", nil, messageID)
+		return
+	}
+	data := strings.TrimSpace(cb.Data)
+	switch data {
+	case "admin:close":
+		_ = b.deleteMessage(chatID, messageID)
+	case "admin:refresh":
+		_ = b.editMessageText(chatID, messageID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(false))
+	case "admin:whitelist:toggle":
+		b.setUserWhitelistEnabled(!b.isUserWhitelistEnabled())
+		_ = b.editMessageText(chatID, messageID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(false))
+	case "admin:forward:toggle":
+		if b.forwardChatID == 0 && !b.isForwardEnabled() {
+			_ = b.sendMessageWithReply(chatID, "未配置归档群 chat_id，无法开启归档转发。", nil, messageID)
+			return
+		}
+		b.setForwardEnabled(!b.isForwardEnabled())
+		_ = b.editMessageText(chatID, messageID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(false))
+	case "admin:cachepush:confirm":
+		_ = b.editMessageText(chatID, messageID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(true))
+	case "admin:cachepush:run":
+		_ = b.editMessageText(chatID, messageID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(false))
+		b.triggerAdminCachePush(chatID, messageID)
+	}
+}
+
+func (b *TelegramBot) triggerAdminCachePush(chatID int64, replyToID int) {
+	if b == nil {
+		return
+	}
+	targetChatID := b.forwardChatID
+	if targetChatID == 0 {
+		_ = b.sendMessageWithReply(chatID, "未配置归档群 chat_id，无法执行缓存转存。", nil, replyToID)
+		return
+	}
+	items := b.listCachedAudioItems()
+	if len(items) == 0 {
+		_ = b.sendMessageWithReply(chatID, "当前没有可转存的缓存音频。", nil, replyToID)
+		return
+	}
+	if !b.beginCachePush() {
+		_ = b.sendMessageWithReply(chatID, "缓存转存任务已经在运行中，请稍后再试。", nil, replyToID)
+		return
+	}
+	total := len(items)
+	_ = b.sendMessageWithReply(chatID, fmt.Sprintf("已开始缓存转存，共 %d 条音频，目标群：%d", total, targetChatID), nil, replyToID)
+	go func() {
+		runWithRecovery("telegram admin cache push", nil, func() {
+			defer b.endCachePush()
+			success := 0
+			failed := 0
+			for idx, item := range items {
+				if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, item.Entry, 0, item.TrackID); err != nil {
+					failed++
+					fmt.Printf("admin cache push failed idx=%d track=%s err=%v\n", idx+1, item.TrackID, err)
+					appendRuntimeErrorLogf("admin cache push failed idx=%d track=%s err=%v", idx+1, item.TrackID, err)
+				} else {
+					success++
+				}
+				if idx+1 < total && (idx+1)%25 == 0 {
+					_ = b.sendMessageWithReply(chatID, fmt.Sprintf("缓存转存进度：%d/%d（成功 %d，失败 %d）", idx+1, total, success, failed), nil, 0)
+				}
+			}
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("缓存转存完成：成功 %d，失败 %d，目标群：%d", success, failed, targetChatID), nil, 0)
+		})
+	}()
+}
+
 func (b *TelegramBot) cancelPanelAndDelete(chatID int64, messageID int) {
 	b.clearPanelStateByMessage(chatID, messageID)
 	if err := b.deleteMessage(chatID, messageID); err != nil {
@@ -3343,6 +3472,10 @@ func (b *TelegramBot) clearPanelStateByMessage(chatID int64, messageID int) {
 
 func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 	if q == nil || q.ID == "" {
+		return
+	}
+	if !b.isAllowedUser(inlineQueryUserID(q)) {
+		_ = b.answerInlineQuery(q.ID, []any{}, true)
 		return
 	}
 	query := strings.TrimSpace(q.Query)
@@ -3396,10 +3529,16 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 }
 
 func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, args []string, replyToID int) {
+	b.handleCommandWithContext(chatID, chatType, 0, cmd, args, replyToID, nil)
+}
+
+func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, userID int64, cmd string, args []string, replyToID int, replyTo *Message) {
 	cmd = normalizeTelegramBotCommand(cmd)
 	switch cmd {
 	case "start", "help":
 		_ = b.sendMessage(chatID, b.botHelpTextForChat(chatID), nil)
+	case "amwhoami":
+		_ = b.sendMessageWithReply(chatID, formatWhoAmIText(userID, chatID), nil, replyToID)
 	case "search_song":
 		b.handleSearch(chatID, "song", strings.Join(args, " "), replyToID)
 	case "search_album":
@@ -3690,6 +3829,104 @@ func (b *TelegramBot) handleCommand(chatID int64, chatType string, cmd string, a
 		}
 		settings := b.getChatSettings(chatID)
 		_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)
+	case "amadmin":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以打开管理员面板。", nil, replyToID)
+			return
+		}
+		b.openAdminPanel(chatID, replyToID)
+	case "amcachepush":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以执行缓存转存。", nil, replyToID)
+			return
+		}
+		b.triggerAdminCachePush(chatID, replyToID)
+	case "amwlon":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以开启白名单模式。", nil, replyToID)
+			return
+		}
+		changed := b.setUserWhitelistEnabled(true)
+		if changed {
+			_ = b.sendMessageWithReply(chatID, "已开启用户白名单模式。", nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, "用户白名单模式已经处于开启状态。", nil, replyToID)
+		}
+	case "amwloff":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以关闭白名单模式。", nil, replyToID)
+			return
+		}
+		changed := b.setUserWhitelistEnabled(false)
+		if changed {
+			_ = b.sendMessageWithReply(chatID, "已关闭用户白名单模式。", nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, "用户白名单模式已经处于关闭状态。", nil, replyToID)
+		}
+	case "amwladd":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以添加白名单用户。", nil, replyToID)
+			return
+		}
+		targetUserID, err := resolveAdminTargetUserID(args, replyTo)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, "Usage: /amwladd <user_id> 或回复某个用户消息后发送 /amwladd", nil, replyToID)
+			return
+		}
+		if b.addUserWhitelist(targetUserID) {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("已加入白名单：%d", targetUserID), nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("该用户已经在白名单中：%d", targetUserID), nil, replyToID)
+		}
+	case "amwldel":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以移除白名单用户。", nil, replyToID)
+			return
+		}
+		targetUserID, err := resolveAdminTargetUserID(args, replyTo)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, "Usage: /amwldel <user_id> 或回复某个用户消息后发送 /amwldel", nil, replyToID)
+			return
+		}
+		if b.removeUserWhitelist(targetUserID) {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("已移出白名单：%d", targetUserID), nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("该用户不在白名单中：%d", targetUserID), nil, replyToID)
+		}
+	case "amban":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以封禁用户。", nil, replyToID)
+			return
+		}
+		targetUserID, err := resolveAdminTargetUserID(args, replyTo)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, "Usage: /amban <user_id> 或回复某个用户消息后发送 /amban", nil, replyToID)
+			return
+		}
+		if b.isAdminUser(targetUserID) {
+			_ = b.sendMessageWithReply(chatID, "不能封禁管理员。", nil, replyToID)
+			return
+		}
+		if b.addUserBlacklist(targetUserID) {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("已封禁用户：%d", targetUserID), nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("该用户已经在黑名单中：%d", targetUserID), nil, replyToID)
+		}
+	case "amunban":
+		if !b.isAdminUser(userID) {
+			_ = b.sendMessageWithReply(chatID, "只有管理员可以解除封禁。", nil, replyToID)
+			return
+		}
+		targetUserID, err := resolveAdminTargetUserID(args, replyTo)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, "Usage: /amunban <user_id> 或回复某个用户消息后发送 /amunban", nil, replyToID)
+			return
+		}
+		if b.removeUserBlacklist(targetUserID) {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("已解除封禁：%d", targetUserID), nil, replyToID)
+		} else {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("该用户不在黑名单中：%d", targetUserID), nil, replyToID)
+		}
 	default:
 		if strings.EqualFold(strings.TrimSpace(chatType), "private") {
 			_ = b.sendMessage(chatID, b.localizeOutgoingText(chatID, "Unknown command. Send /help for usage."), nil)
@@ -7280,11 +7517,416 @@ func (b *TelegramBot) apiURL(method string) string {
 	return fmt.Sprintf("%s/bot%s/%s", b.apiBase, b.token, method)
 }
 
+func messageUserID(msg *Message) int64 {
+	if msg == nil || msg.From == nil {
+		return 0
+	}
+	return msg.From.ID
+}
+
+func callbackUserID(cb *CallbackQuery) int64 {
+	if cb == nil || cb.From == nil {
+		return 0
+	}
+	return cb.From.ID
+}
+
+func inlineQueryUserID(q *InlineQuery) int64 {
+	if q == nil || q.From == nil {
+		return 0
+	}
+	return q.From.ID
+}
+
+func parseTelegramUserID(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, fmt.Errorf("user_id is empty")
+	}
+	userID, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || userID <= 0 {
+		return 0, fmt.Errorf("invalid user_id")
+	}
+	return userID, nil
+}
+
+func resolveAdminTargetUserID(args []string, replyTo *Message) (int64, error) {
+	if len(args) > 0 {
+		return parseTelegramUserID(args[0])
+	}
+	if replyTo != nil && replyTo.From != nil && replyTo.From.ID > 0 {
+		return replyTo.From.ID, nil
+	}
+	return 0, fmt.Errorf("target user is required")
+}
+
+func boolPtr(v bool) *bool {
+	value := v
+	return &value
+}
+
+func snapshotIDSet(items map[int64]bool) []int64 {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(items))
+	for id, enabled := range items {
+		if !enabled || id == 0 {
+			continue
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func (b *TelegramBot) isAdminUser(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	return b.adminUsers[userID]
+}
+
 func (b *TelegramBot) isAllowedChat(chatID int64) bool {
 	if len(b.allowedChats) == 0 {
 		return true
 	}
 	return b.allowedChats[chatID]
+}
+
+func (b *TelegramBot) isUserWhitelisted(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return b.userWhitelist[userID]
+}
+
+func (b *TelegramBot) isUserBlacklisted(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return b.userBlacklist[userID]
+}
+
+func (b *TelegramBot) isUserWhitelistEnabled() bool {
+	if b == nil {
+		return false
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return b.userWhitelistEnabled
+}
+
+func (b *TelegramBot) isAllowedUser(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	if b.isAdminUser(userID) {
+		return true
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	if b.userBlacklist[userID] {
+		return false
+	}
+	if !b.userWhitelistEnabled {
+		return true
+	}
+	return b.userWhitelist[userID]
+}
+
+func (b *TelegramBot) setUserWhitelistEnabled(enabled bool) bool {
+	if b == nil {
+		return false
+	}
+	b.accessMu.Lock()
+	changed := b.userWhitelistEnabled != enabled
+	b.userWhitelistEnabled = enabled
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) isForwardEnabled() bool {
+	if b == nil {
+		return false
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return b.forwardEnabled
+}
+
+func (b *TelegramBot) setForwardEnabled(enabled bool) bool {
+	if b == nil {
+		return false
+	}
+	b.accessMu.Lock()
+	changed := b.forwardEnabled != enabled
+	b.forwardEnabled = enabled
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) addUserWhitelist(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.Lock()
+	if b.userWhitelist == nil {
+		b.userWhitelist = make(map[int64]bool)
+	}
+	changed := !b.userWhitelist[userID]
+	b.userWhitelist[userID] = true
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) removeUserWhitelist(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.Lock()
+	changed := b.userWhitelist[userID]
+	delete(b.userWhitelist, userID)
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) addUserBlacklist(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.Lock()
+	if b.userBlacklist == nil {
+		b.userBlacklist = make(map[int64]bool)
+	}
+	changed := !b.userBlacklist[userID]
+	b.userBlacklist[userID] = true
+	delete(b.userWhitelist, userID)
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) removeUserBlacklist(userID int64) bool {
+	if b == nil || userID == 0 {
+		return false
+	}
+	b.accessMu.Lock()
+	changed := b.userBlacklist[userID]
+	delete(b.userBlacklist, userID)
+	b.accessMu.Unlock()
+	if changed {
+		b.requestStateSave()
+	}
+	return changed
+}
+
+func (b *TelegramBot) userWhitelistCount() int {
+	if b == nil {
+		return 0
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return len(b.userWhitelist)
+}
+
+func (b *TelegramBot) userBlacklistCount() int {
+	if b == nil {
+		return 0
+	}
+	b.accessMu.RLock()
+	defer b.accessMu.RUnlock()
+	return len(b.userBlacklist)
+}
+
+func (b *TelegramBot) adminUserCount() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.adminUsers)
+}
+
+func (b *TelegramBot) isCachePushRunning() bool {
+	if b == nil {
+		return false
+	}
+	b.adminTaskMu.Lock()
+	defer b.adminTaskMu.Unlock()
+	return b.cachePushRunning
+}
+
+func (b *TelegramBot) beginCachePush() bool {
+	if b == nil {
+		return false
+	}
+	b.adminTaskMu.Lock()
+	defer b.adminTaskMu.Unlock()
+	if b.cachePushRunning {
+		return false
+	}
+	b.cachePushRunning = true
+	return true
+}
+
+func (b *TelegramBot) endCachePush() {
+	if b == nil {
+		return
+	}
+	b.adminTaskMu.Lock()
+	b.cachePushRunning = false
+	b.adminTaskMu.Unlock()
+}
+
+type cachedAudioItem struct {
+	Key     string
+	TrackID string
+	Entry   CachedAudio
+}
+
+func cachedAudioSortTime(entry CachedAudio) time.Time {
+	if !entry.CreatedAt.IsZero() {
+		return entry.CreatedAt
+	}
+	return entry.UpdatedAt
+}
+
+func (b *TelegramBot) listCachedAudioItems() []cachedAudioItem {
+	if b == nil {
+		return nil
+	}
+	b.cacheMu.Lock()
+	items := make([]cachedAudioItem, 0, len(b.cache))
+	for key, entry := range b.cache {
+		parts := strings.Split(key, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		items = append(items, cachedAudioItem{
+			Key:     key,
+			TrackID: strings.TrimSpace(parts[0]),
+			Entry:   entry,
+		})
+	}
+	b.cacheMu.Unlock()
+	sort.Slice(items, func(i, j int) bool {
+		left := cachedAudioSortTime(items[i].Entry)
+		right := cachedAudioSortTime(items[j].Entry)
+		switch {
+		case left.IsZero() && !right.IsZero():
+			return false
+		case !left.IsZero() && right.IsZero():
+			return true
+		case !left.Equal(right):
+			return left.Before(right)
+		default:
+			return items[i].Key < items[j].Key
+		}
+	})
+	return items
+}
+
+func (b *TelegramBot) formatAdminPanelText(chatID int64) string {
+	whitelistMode := "关闭"
+	if b.isUserWhitelistEnabled() {
+		whitelistMode = "开启"
+	}
+	forwardStatus := "关闭"
+	if b.isForwardEnabled() {
+		forwardStatus = "开启"
+	}
+	forwardChatLabel := "未配置"
+	if b != nil && b.forwardChatID != 0 {
+		forwardChatLabel = strconv.FormatInt(b.forwardChatID, 10)
+	}
+	cachePushStatus := "空闲"
+	if b.isCachePushRunning() {
+		cachePushStatus = "运行中"
+	}
+	if b.getChatLanguage(chatID) == telegramLanguageEn {
+		return fmt.Sprintf("Admin panel\n- Whitelist mode: %s\n- Archive forward: %s\n- Archive chat_id: %s\n- Cache push task: %s\n- Admin users: %d\n- Whitelisted users: %d\n- Blacklisted users: %d",
+			map[bool]string{true: "ON", false: "OFF"}[b.isUserWhitelistEnabled()],
+			map[bool]string{true: "ON", false: "OFF"}[b.isForwardEnabled()],
+			forwardChatLabel,
+			map[bool]string{true: "RUNNING", false: "IDLE"}[b.isCachePushRunning()],
+			b.adminUserCount(),
+			b.userWhitelistCount(),
+			b.userBlacklistCount(),
+		)
+	}
+	return fmt.Sprintf("管理员面板\n- 白名单模式：%s\n- 归档转发：%s\n- 归档群 chat_id：%s\n- 缓存转存任务：%s\n- 管理员数量：%d\n- 白名单人数：%d\n- 黑名单人数：%d",
+		whitelistMode,
+		forwardStatus,
+		forwardChatLabel,
+		cachePushStatus,
+		b.adminUserCount(),
+		b.userWhitelistCount(),
+		b.userBlacklistCount(),
+	)
+}
+
+func (b *TelegramBot) buildAdminPanelKeyboard(confirmCachePush bool) InlineKeyboardMarkup {
+	whitelistLabel := "白名单：关闭"
+	if b.isUserWhitelistEnabled() {
+		whitelistLabel = "白名单：开启"
+	}
+	forwardLabel := "归档转发：关闭"
+	if b.isForwardEnabled() {
+		forwardLabel = "归档转发：开启"
+	}
+	rows := [][]InlineKeyboardButton{
+		{{Text: whitelistLabel, CallbackData: "admin:whitelist:toggle"}},
+		{{Text: forwardLabel, CallbackData: "admin:forward:toggle"}},
+	}
+	if confirmCachePush {
+		rows = append(rows,
+			[]InlineKeyboardButton{
+				{Text: "确认转存", CallbackData: "admin:cachepush:run"},
+				{Text: "返回", CallbackData: "admin:refresh"},
+			},
+		)
+	} else {
+		rows = append(rows,
+			[]InlineKeyboardButton{
+				{Text: "缓存转存到归档群", CallbackData: "admin:cachepush:confirm"},
+			},
+		)
+	}
+	rows = append(rows,
+		[]InlineKeyboardButton{
+			{Text: "刷新", CallbackData: "admin:refresh"},
+			{Text: "关闭", CallbackData: "admin:close"},
+		},
+	)
+	return InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func (b *TelegramBot) openAdminPanel(chatID int64, replyToID int) {
+	_ = b.sendMessageWithReply(chatID, b.formatAdminPanelText(chatID), b.buildAdminPanelKeyboard(false), replyToID)
+}
+
+func formatWhoAmIText(userID int64, chatID int64) string {
+	return fmt.Sprintf("用户ID: %d\n会话ID(chat_id): %d", userID, chatID)
 }
 
 func (b *TelegramBot) setPending(chatID int64, kind string, query string, storefront string, offset int, items []apputils.SearchResultItem, hasNext bool, replyToID int, resultsMessageID int, title string) {
@@ -7737,6 +8379,15 @@ func botHelpText() string {
 /ac <url|type id> 仅下载动态封面
 /ly <song|album> 导出歌词文件（格式由设置决定）
 /st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/内嵌开关/自动附加/歌曲赏析）
+/amadmin 管理员面板（仅管理员）
+/amwlon 开启用户白名单模式（仅管理员）
+/amwloff 关闭用户白名单模式（仅管理员）
+/amwladd <user_id> 添加白名单用户（仅管理员）
+/amwldel <user_id> 移除白名单用户（仅管理员）
+/amban <user_id> 封禁用户（仅管理员）
+/amunban <user_id> 解除封禁（仅管理员）
+/amcachepush 批量转存缓存音频到归档群（仅管理员）
+/amwhoami 查看当前 user_id / chat_id
 
 参数说明：
 - /s 的 <类型>：song | album | artist
@@ -7768,6 +8419,15 @@ Command list (short aliases):
 /ac <url|type id> Download animated cover only
 /ly <song|album> Export lyrics files (format depends on settings)
 /st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/embed toggles/auto extras/song comment/language)
+/amadmin Admin panel (admin only)
+/amwlon Enable user whitelist mode (admin only)
+/amwloff Disable user whitelist mode (admin only)
+/amwladd <user_id> Add a whitelisted user (admin only)
+/amwldel <user_id> Remove a whitelisted user (admin only)
+/amban <user_id> Ban a user (admin only)
+/amunban <user_id> Unban a user (admin only)
+/amcachepush Push cached audio items to archive chat (admin only)
+/amwhoami Show current user_id / chat_id
 
 Parameters:
 - /s <type>: song | album | artist

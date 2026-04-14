@@ -48,6 +48,10 @@ type ConfigSet struct {
 	ConvertSkipLossyToLossless       bool    `yaml:"convert-skip-lossy-to-lossless"`
 	TelegramBotToken                 string  `yaml:"telegram-bot-token"`
 	LastFMAPIKey                     string  `yaml:"lastfm-api-key"`
+	TelegramAdminUserIDs             []int64 `yaml:"telegram-admin-user-ids"`
+	TelegramUserWhitelistEnabled     bool    `yaml:"telegram-user-whitelist-enabled"`
+	TelegramForwardChatID            int64   `yaml:"telegram-forward-chat-id"`
+	TelegramForwardEnabled           bool    `yaml:"telegram-forward-enabled"`
 	TelegramAllowedChatIDs           []int64 `yaml:"telegram-allowed-chat-ids"`
 	TelegramSearchLimit              int     `yaml:"telegram-search-limit"`
 	TelegramSearchLanguage           string  `yaml:"telegram-search-language"`

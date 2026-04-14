@@ -63,13 +63,17 @@ convert-skip-lossy-to-lossless: true # If true, skip converting detected lossy s
 # Telegram bot settings
 telegram-bot-token: ""            # Bot token or set TELEGRAM_BOT_TOKEN
 lastfm-api-key: ""                # Optional: enable song comment source (Last.fm) for Telegram song analysis messages
+telegram-admin-user-ids: []       # 管理员 user_id 列表；管理员不受用户白名单/黑名单限制，但仍需通过 telegram-allowed-chat-ids
+telegram-user-whitelist-enabled: false # 用户白名单模式默认开关；运行时通过 /amadmin 或命令切换后会写入 telegram-state-file，不回写 config.yaml
+telegram-forward-chat-id: 0       # 歌曲实时归档 / 缓存批量转存的目标群 chat_id；0 表示未配置
+telegram-forward-enabled: false   # 实时归档默认开关；运行时通过 /amadmin 切换后会写入 telegram-state-file，不回写 config.yaml
 telegram-api-url: ""              # Optional API base URL override (default: https://api.telegram.org). Avoid plain HTTP unless you trust the network.
 telegram-http-timeout-sec: 180    # Telegram API request timeout for send/edit/upload calls
 telegram-poll-timeout-sec: 75     # getUpdates long-poll HTTP timeout (should be > 30)
 telegram-daily-restart-enabled: true # Auto restart bot runtime at local 00:00 (recommended for long-running stability)
 telegram-proxy-url: ""            # Optional explicit proxy for Telegram API, e.g. http://127.0.0.1:7890
 telegram-no-proxy: false          # If true, ignore env proxy and telegram-proxy-url (direct connect)
-telegram-allowed-chat-ids: []     # Optional chat ID allowlist
+telegram-allowed-chat-ids: []     # 可用 chat_id 白名单；普通消息/回调会先过这层，inline query 无 chat 上下文，只能走用户权限校验
 telegram-search-limit: 8          # Results per search
 telegram-search-language: "zh-Hans"      # Optional search language override (e.g. zh-Hans, zh-Hant)
 telegram-max-file-mb: 50          # Max file size to send

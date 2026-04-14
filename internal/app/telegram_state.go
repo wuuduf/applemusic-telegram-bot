@@ -38,16 +38,20 @@ type telegramPersistedAutoDelete struct {
 }
 
 type telegramPersistedState struct {
-	Version            int                                 `json:"version"`
-	SavedAt            time.Time                           `json:"saved_at"`
-	Pending            map[int64]map[int]PendingSelection  `json:"pending,omitempty"`
-	PendingTransfers   map[int64]map[int]PendingTransfer   `json:"pending_transfers,omitempty"`
-	PendingArtistModes map[int64]map[int]PendingArtistMode `json:"pending_artist_modes,omitempty"`
-	Requests           []telegramPersistedRequest          `json:"requests,omitempty"`
-	InflightKeys       []string                            `json:"inflight_keys,omitempty"`
-	AutoDelete         []telegramPersistedAutoDelete       `json:"auto_delete,omitempty"`
-	ChatSettings       map[int64]ChatDownloadSettings      `json:"chat_settings,omitempty"`
-	SearchMeta         map[string]AudioMeta                `json:"search_meta,omitempty"`
+	Version              int                                 `json:"version"`
+	SavedAt              time.Time                           `json:"saved_at"`
+	Pending              map[int64]map[int]PendingSelection  `json:"pending,omitempty"`
+	PendingTransfers     map[int64]map[int]PendingTransfer   `json:"pending_transfers,omitempty"`
+	PendingArtistModes   map[int64]map[int]PendingArtistMode `json:"pending_artist_modes,omitempty"`
+	Requests             []telegramPersistedRequest          `json:"requests,omitempty"`
+	InflightKeys         []string                            `json:"inflight_keys,omitempty"`
+	AutoDelete           []telegramPersistedAutoDelete       `json:"auto_delete,omitempty"`
+	ChatSettings         map[int64]ChatDownloadSettings      `json:"chat_settings,omitempty"`
+	SearchMeta           map[string]AudioMeta                `json:"search_meta,omitempty"`
+	UserWhitelistEnabled *bool                               `json:"user_whitelist_enabled,omitempty"`
+	UserWhitelist        []int64                             `json:"user_whitelist,omitempty"`
+	UserBlacklist        []int64                             `json:"user_blacklist,omitempty"`
+	ForwardEnabled       *bool                               `json:"forward_enabled,omitempty"`
 }
 
 func resolveTelegramStateFile(cacheFile string) string {
@@ -339,6 +343,13 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	}
 	b.settingsMu.Unlock()
 
+	b.accessMu.RLock()
+	state.UserWhitelistEnabled = boolPtr(b.userWhitelistEnabled)
+	state.UserWhitelist = snapshotIDSet(b.userWhitelist)
+	state.UserBlacklist = snapshotIDSet(b.userBlacklist)
+	state.ForwardEnabled = boolPtr(b.forwardEnabled)
+	b.accessMu.RUnlock()
+
 	searchMetaMu.Lock()
 	for trackID, meta := range searchMetaByID {
 		state.SearchMeta[trackID] = meta
@@ -368,6 +379,12 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	}
 	if len(state.SearchMeta) == 0 {
 		state.SearchMeta = nil
+	}
+	if len(state.UserWhitelist) == 0 {
+		state.UserWhitelist = nil
+	}
+	if len(state.UserBlacklist) == 0 {
+		state.UserBlacklist = nil
 	}
 	return state
 }
@@ -459,6 +476,39 @@ func (b *TelegramBot) restoreRuntimeState() {
 		b.chatSettings[chatID] = normalizeChatSettings(settings)
 	}
 	b.settingsMu.Unlock()
+
+	b.accessMu.Lock()
+	if b.userWhitelist == nil {
+		b.userWhitelist = make(map[int64]bool)
+	} else {
+		for userID := range b.userWhitelist {
+			delete(b.userWhitelist, userID)
+		}
+	}
+	if b.userBlacklist == nil {
+		b.userBlacklist = make(map[int64]bool)
+	} else {
+		for userID := range b.userBlacklist {
+			delete(b.userBlacklist, userID)
+		}
+	}
+	if state.UserWhitelistEnabled != nil {
+		b.userWhitelistEnabled = *state.UserWhitelistEnabled
+	}
+	if state.ForwardEnabled != nil {
+		b.forwardEnabled = *state.ForwardEnabled
+	}
+	for _, userID := range state.UserWhitelist {
+		if userID != 0 {
+			b.userWhitelist[userID] = true
+		}
+	}
+	for _, userID := range state.UserBlacklist {
+		if userID != 0 {
+			b.userBlacklist[userID] = true
+		}
+	}
+	b.accessMu.Unlock()
 
 	searchMetaMu.Lock()
 	for trackID, meta := range state.SearchMeta {

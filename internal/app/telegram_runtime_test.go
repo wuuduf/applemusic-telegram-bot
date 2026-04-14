@@ -90,9 +90,13 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 		chatSettings: map[int64]ChatDownloadSettings{
 			1: {Format: telegramFormatAlac, Language: telegramLanguageEn, SettingsInited: true},
 		},
-		autoDeleteMessages: make(map[string]*time.Timer),
-		autoDeleteSticky:   make(map[string]bool),
-		autoDeleteDeadline: make(map[string]time.Time),
+		userWhitelistEnabled: true,
+		userWhitelist:        map[int64]bool{3001: true},
+		userBlacklist:        map[int64]bool{4001: true},
+		forwardEnabled:       true,
+		autoDeleteMessages:   make(map[string]*time.Timer),
+		autoDeleteSticky:     make(map[string]bool),
+		autoDeleteDeadline:   make(map[string]time.Time),
 	}
 	autoDeleteAt := time.Now().Add(5 * time.Minute)
 	b.scheduleAutoDeleteMessageAt(1, 99, true, autoDeleteAt)
@@ -126,6 +130,18 @@ func TestTelegramRuntimeStateSaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.ChatSettings[1].Language != telegramLanguageEn {
 		t.Fatalf("expected persisted chat language to be en, got %+v", loaded.ChatSettings[1])
+	}
+	if loaded.UserWhitelistEnabled == nil || !*loaded.UserWhitelistEnabled {
+		t.Fatalf("expected persisted whitelist mode enabled, got %+v", loaded.UserWhitelistEnabled)
+	}
+	if len(loaded.UserWhitelist) != 1 || loaded.UserWhitelist[0] != 3001 {
+		t.Fatalf("expected persisted whitelist users, got %+v", loaded.UserWhitelist)
+	}
+	if len(loaded.UserBlacklist) != 1 || loaded.UserBlacklist[0] != 4001 {
+		t.Fatalf("expected persisted blacklist users, got %+v", loaded.UserBlacklist)
+	}
+	if loaded.ForwardEnabled == nil || !*loaded.ForwardEnabled {
+		t.Fatalf("expected persisted forward flag enabled, got %+v", loaded.ForwardEnabled)
 	}
 }
 
@@ -268,6 +284,58 @@ func TestTelegramRuntimeStateRestoreSchedulesAutoDeleteTimers(t *testing.T) {
 	}
 	if restoredDeleteAt.IsZero() {
 		t.Fatalf("expected restored auto-delete deadline")
+	}
+}
+
+func TestTelegramRuntimeStateRestoreRecoversUserAccessState(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "telegram-state.json")
+	state := telegramPersistedState{
+		Version:              telegramStateVersion,
+		UserWhitelistEnabled: boolPtr(true),
+		UserWhitelist:        []int64{3001, 3002},
+		UserBlacklist:        []int64{4001},
+		ForwardEnabled:       boolPtr(true),
+	}
+	payload, err := jsonMarshalIndentForTest(state)
+	if err != nil {
+		t.Fatalf("marshal state failed: %v", err)
+	}
+	if err := os.WriteFile(statePath, payload, 0644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	b := &TelegramBot{
+		stateFile:            statePath,
+		appleToken:           "token",
+		pending:              make(map[int64]map[int]*PendingSelection),
+		pendingTransfers:     make(map[int64]map[int]*PendingTransfer),
+		pendingArtistModes:   make(map[int64]map[int]*PendingArtistMode),
+		chatSettings:         make(map[int64]ChatDownloadSettings),
+		inflightDownloads:    make(map[string]struct{}),
+		activeRequests:       make(map[string]telegramPersistedRequest),
+		downloadQueue:        make(chan *downloadRequest, 1),
+		stateSave:            make(chan struct{}, 1),
+		userWhitelistEnabled: false,
+		userWhitelist:        make(map[int64]bool),
+		userBlacklist:        make(map[int64]bool),
+		autoDeleteMessages:   make(map[string]*time.Timer),
+		autoDeleteSticky:     make(map[string]bool),
+		autoDeleteDeadline:   make(map[string]time.Time),
+	}
+	b.restoreRuntimeState()
+
+	if !b.isUserWhitelistEnabled() {
+		t.Fatalf("expected whitelist mode restored")
+	}
+	if !b.isUserWhitelisted(3001) || !b.isUserWhitelisted(3002) {
+		t.Fatalf("expected whitelist users restored")
+	}
+	if !b.isUserBlacklisted(4001) {
+		t.Fatalf("expected blacklist user restored")
+	}
+	if !b.isForwardEnabled() {
+		t.Fatalf("expected forward flag restored")
 	}
 }
 

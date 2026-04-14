@@ -250,10 +250,15 @@ func atomicWriteTelegramCacheFile(target string, data []byte) error {
 }
 
 func (b *TelegramBot) fetchTrackMeta(trackID string) (AudioMeta, error) {
+	return b.fetchTrackMetaWithStorefront(trackID, "")
+}
+
+func (b *TelegramBot) fetchTrackMetaWithStorefront(trackID string, storefront string) (AudioMeta, error) {
 	if trackID == "" {
 		return AudioMeta{}, fmt.Errorf("empty track id")
 	}
-	resp, err := ampapi.GetSongResp(Config.Storefront, trackID, b.searchLanguage(), b.appleToken)
+	storefront = normalizeSongCommentStorefront(storefront)
+	resp, err := ampapi.GetSongResp(storefront, trackID, b.searchLanguage(), b.appleToken)
 	if err != nil || resp == nil {
 		if err != nil {
 			return AudioMeta{}, err
@@ -269,7 +274,83 @@ func (b *TelegramBot) fetchTrackMeta(trackID string) (AudioMeta, error) {
 		Title:          strings.TrimSpace(data.Attributes.Name),
 		Performer:      strings.TrimSpace(data.Attributes.ArtistName),
 		DurationMillis: int64(data.Attributes.DurationInMillis),
+		AlbumName:      strings.TrimSpace(data.Attributes.AlbumName),
+		GenreNames:     compactTelegramGenreNames(data.Attributes.GenreNames),
+		Storefront:     storefront,
 	}, nil
+}
+
+func equalStringSlices(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func compactTelegramGenreNames(genres []string) []string {
+	cleaned := sanitizeTagList(genres)
+	if len(cleaned) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(cleaned))
+	for _, genre := range cleaned {
+		switch strings.ToLower(strings.TrimSpace(genre)) {
+		case "", "music", "音乐":
+			continue
+		default:
+			filtered = append(filtered, genre)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func (b *TelegramBot) enrichAudioMeta(meta AudioMeta) AudioMeta {
+	meta = normalizeSongCommentMeta(meta)
+	meta.GenreNames = compactTelegramGenreNames(meta.GenreNames)
+	if b == nil || strings.TrimSpace(meta.TrackID) == "" {
+		return meta
+	}
+	needsMeta := meta.DurationMillis <= 0 ||
+		strings.TrimSpace(meta.Title) == "" ||
+		strings.TrimSpace(meta.Performer) == "" ||
+		strings.TrimSpace(meta.AlbumName) == "" ||
+		len(meta.GenreNames) == 0
+	if !needsMeta {
+		return meta
+	}
+	fetched, err := b.fetchTrackMetaWithStorefront(meta.TrackID, meta.Storefront)
+	if err != nil {
+		return meta
+	}
+	if meta.DurationMillis <= 0 && fetched.DurationMillis > 0 {
+		meta.DurationMillis = fetched.DurationMillis
+	}
+	if meta.Title == "" && fetched.Title != "" {
+		meta.Title = fetched.Title
+	}
+	if meta.Performer == "" && fetched.Performer != "" {
+		meta.Performer = fetched.Performer
+	}
+	if meta.AlbumName == "" && fetched.AlbumName != "" {
+		meta.AlbumName = fetched.AlbumName
+	}
+	if len(meta.GenreNames) == 0 && len(fetched.GenreNames) > 0 {
+		meta.GenreNames = append([]string(nil), fetched.GenreNames...)
+	}
+	if meta.Storefront == "" && fetched.Storefront != "" {
+		meta.Storefront = fetched.Storefront
+	}
+	meta = normalizeSongCommentMeta(meta)
+	meta.GenreNames = compactTelegramGenreNames(meta.GenreNames)
+	return meta
 }
 
 func (b *TelegramBot) enrichCachedAudio(trackID string, entry CachedAudio) CachedAudio {
@@ -282,20 +363,46 @@ func (b *TelegramBot) enrichCachedAudio(trackID string, entry CachedAudio) Cache
 			updated = true
 		}
 	}
-	if trackID != "" && (entry.DurationMillis <= 0 || entry.Title == "" || entry.Performer == "") {
-		if meta, err := b.fetchTrackMeta(trackID); err == nil {
-			if entry.DurationMillis <= 0 && meta.DurationMillis > 0 {
-				entry.DurationMillis = meta.DurationMillis
-				updated = true
-			}
-			if entry.Title == "" && meta.Title != "" {
-				entry.Title = meta.Title
-				updated = true
-			}
-			if entry.Performer == "" && meta.Performer != "" {
-				entry.Performer = meta.Performer
-				updated = true
-			}
+	entry.Title = strings.TrimSpace(entry.Title)
+	entry.Performer = strings.TrimSpace(entry.Performer)
+	entry.AlbumName = strings.TrimSpace(entry.AlbumName)
+	entry.GenreNames = compactTelegramGenreNames(entry.GenreNames)
+	if strings.TrimSpace(entry.Storefront) != "" {
+		entry.Storefront = normalizeSongCommentStorefront(entry.Storefront)
+	}
+	if trackID != "" {
+		meta := b.enrichAudioMeta(AudioMeta{
+			TrackID:        trackID,
+			Title:          entry.Title,
+			Performer:      entry.Performer,
+			DurationMillis: entry.DurationMillis,
+			AlbumName:      entry.AlbumName,
+			GenreNames:     append([]string(nil), entry.GenreNames...),
+			Storefront:     entry.Storefront,
+		})
+		if entry.DurationMillis != meta.DurationMillis && meta.DurationMillis > 0 {
+			entry.DurationMillis = meta.DurationMillis
+			updated = true
+		}
+		if entry.Title != meta.Title && meta.Title != "" {
+			entry.Title = meta.Title
+			updated = true
+		}
+		if entry.Performer != meta.Performer && meta.Performer != "" {
+			entry.Performer = meta.Performer
+			updated = true
+		}
+		if entry.AlbumName != meta.AlbumName && meta.AlbumName != "" {
+			entry.AlbumName = meta.AlbumName
+			updated = true
+		}
+		if !equalStringSlices(entry.GenreNames, meta.GenreNames) && len(meta.GenreNames) > 0 {
+			entry.GenreNames = append([]string(nil), meta.GenreNames...)
+			updated = true
+		}
+		if entry.Storefront != meta.Storefront && meta.Storefront != "" {
+			entry.Storefront = meta.Storefront
+			updated = true
 		}
 	}
 	if entry.BitrateKbps <= 0 && sizeBytes > 0 && entry.DurationMillis > 0 {
@@ -321,8 +428,28 @@ func (b *TelegramBot) storeCachedAudio(trackID string, entry CachedAudio) {
 	if entry.Format == "" {
 		entry.Format = defaultTelegramFormat
 	}
-	entry.UpdatedAt = time.Now()
-	b.cache[b.cacheKey(trackID, entry.Format, entry.Compressed)] = entry
+	entry.Title = strings.TrimSpace(entry.Title)
+	entry.Performer = strings.TrimSpace(entry.Performer)
+	entry.AlbumName = strings.TrimSpace(entry.AlbumName)
+	entry.GenreNames = compactTelegramGenreNames(entry.GenreNames)
+	entry.Storefront = strings.TrimSpace(strings.ToLower(entry.Storefront))
+	cacheKey := b.cacheKey(trackID, entry.Format, entry.Compressed)
+	now := time.Now()
+	if existing, ok := b.cache[cacheKey]; ok {
+		switch {
+		case !entry.CreatedAt.IsZero():
+		case !existing.CreatedAt.IsZero():
+			entry.CreatedAt = existing.CreatedAt
+		case !existing.UpdatedAt.IsZero():
+			entry.CreatedAt = existing.UpdatedAt
+		default:
+			entry.CreatedAt = now
+		}
+	} else if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = now
+	}
+	entry.UpdatedAt = now
+	b.cache[cacheKey] = entry
 	b.saveCacheLocked()
 }
 

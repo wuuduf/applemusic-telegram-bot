@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -710,6 +711,449 @@ func TestHandleCommandCoverQueuesHeavyTask(t *testing.T) {
 	}
 }
 
+func TestResolveAdminTargetUserIDPrefersExplicitArgument(t *testing.T) {
+	replyTo := &Message{From: &User{ID: 2002}}
+	got, err := resolveAdminTargetUserID([]string{"1001"}, replyTo)
+	if err != nil {
+		t.Fatalf("resolveAdminTargetUserID failed: %v", err)
+	}
+	if got != 1001 {
+		t.Fatalf("expected explicit user id to win, got %d", got)
+	}
+}
+
+func TestResolveAdminTargetUserIDFallsBackToReply(t *testing.T) {
+	got, err := resolveAdminTargetUserID(nil, &Message{From: &User{ID: 2002}})
+	if err != nil {
+		t.Fatalf("resolveAdminTargetUserID failed: %v", err)
+	}
+	if got != 2002 {
+		t.Fatalf("expected reply target user id, got %d", got)
+	}
+}
+
+func TestTelegramBotUserAccessRules(t *testing.T) {
+	bot := &TelegramBot{
+		adminUsers:           map[int64]bool{1: true},
+		userWhitelistEnabled: true,
+		userWhitelist:        map[int64]bool{2: true},
+		userBlacklist:        map[int64]bool{3: true, 1: true},
+	}
+	if !bot.isAllowedUser(1) {
+		t.Fatalf("expected admin user to bypass user access checks")
+	}
+	if !bot.isAllowedUser(2) {
+		t.Fatalf("expected whitelisted user to pass when whitelist mode is enabled")
+	}
+	if bot.isAllowedUser(3) {
+		t.Fatalf("expected blacklisted user to be denied")
+	}
+	if bot.isAllowedUser(4) {
+		t.Fatalf("expected non-whitelisted user to be denied when whitelist mode is enabled")
+	}
+	bot.setUserWhitelistEnabled(false)
+	if !bot.isAllowedUser(4) {
+		t.Fatalf("expected regular user to pass when whitelist mode is disabled")
+	}
+}
+
+func TestHandleCommandWithContextSupportsReplyBasedBan(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			messages = append(messages, text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		adminUsers:    map[int64]bool{9001: true},
+		userWhitelist: make(map[int64]bool),
+		userBlacklist: make(map[int64]bool),
+	}
+	bot.handleCommandWithContext(42, "private", 9001, "amban", nil, 7, &Message{From: &User{ID: 12345}})
+
+	if !bot.isUserBlacklisted(12345) {
+		t.Fatalf("expected reply target user to be blacklisted")
+	}
+	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1], "已封禁用户：12345") {
+		t.Fatalf("expected success message, got %+v", messages)
+	}
+}
+
+func TestFormatAdminPanelTextIncludesStatsAndForwardChat(t *testing.T) {
+	bot := &TelegramBot{
+		adminUsers:           map[int64]bool{9001: true, 9002: true},
+		userWhitelistEnabled: true,
+		userWhitelist:        map[int64]bool{1001: true, 1002: true, 1003: true},
+		userBlacklist:        map[int64]bool{2001: true},
+		forwardChatID:        -1001234567890,
+		forwardEnabled:       true,
+	}
+
+	text := bot.formatAdminPanelText(42)
+	for _, want := range []string{
+		"管理员面板",
+		"白名单模式：开启",
+		"归档转发：开启",
+		"归档群 chat_id：-1001234567890",
+		"管理员数量：2",
+		"白名单人数：3",
+		"黑名单人数：1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected admin panel text to contain %q, got %q", want, text)
+		}
+	}
+}
+
+func TestBuildAdminPanelKeyboardIncludesExpectedCallbacks(t *testing.T) {
+	bot := &TelegramBot{
+		userWhitelistEnabled: true,
+		forwardEnabled:       true,
+	}
+
+	keyboard := bot.buildAdminPanelKeyboard(false)
+	got := make([]string, 0, 8)
+	for _, row := range keyboard.InlineKeyboard {
+		for _, button := range row {
+			got = append(got, button.CallbackData)
+		}
+	}
+	for _, want := range []string{
+		"admin:whitelist:toggle",
+		"admin:forward:toggle",
+		"admin:cachepush:confirm",
+		"admin:refresh",
+		"admin:close",
+	} {
+		if !containsString(got, want) {
+			t.Fatalf("expected callback %q in %+v", want, got)
+		}
+	}
+
+	confirmKeyboard := bot.buildAdminPanelKeyboard(true)
+	confirmCallbacks := make([]string, 0, 8)
+	for _, row := range confirmKeyboard.InlineKeyboard {
+		for _, button := range row {
+			confirmCallbacks = append(confirmCallbacks, button.CallbackData)
+		}
+	}
+	for _, want := range []string{"admin:cachepush:run", "admin:refresh"} {
+		if !containsString(confirmCallbacks, want) {
+			t.Fatalf("expected confirm callback %q in %+v", want, confirmCallbacks)
+		}
+	}
+}
+
+func TestBotHelpTextIncludesAdminCommands(t *testing.T) {
+	text := botHelpText()
+	for _, want := range []string{
+		"/amadmin",
+		"/amwlon",
+		"/amwloff",
+		"/amwladd <user_id>",
+		"/amwldel <user_id>",
+		"/amban <user_id>",
+		"/amunban <user_id>",
+		"/amcachepush",
+		"/amwhoami",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected help text to contain %q, got %q", want, text)
+		}
+	}
+}
+
+func TestHandleCommandWithContextAmadminRequiresAdminAndOpensPanel(t *testing.T) {
+	var sentTexts []string
+	var sentMarkups []InlineKeyboardMarkup
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			sentTexts = append(sentTexts, text)
+		}
+		if rawMarkup, ok := payload["reply_markup"]; ok && rawMarkup != nil {
+			markupJSON, err := json.Marshal(rawMarkup)
+			if err != nil {
+				t.Fatalf("marshal markup failed: %v", err)
+			}
+			var markup InlineKeyboardMarkup
+			if err := json.Unmarshal(markupJSON, &markup); err != nil {
+				t.Fatalf("unmarshal markup failed: %v", err)
+			}
+			sentMarkups = append(sentMarkups, markup)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:      "test-token",
+		apiBase:    server.URL,
+		client:     server.Client(),
+		adminUsers: map[int64]bool{9001: true},
+	}
+
+	bot.handleCommandWithContext(42, "private", 8001, "amadmin", nil, 7, nil)
+	if len(sentTexts) == 0 || !strings.Contains(sentTexts[len(sentTexts)-1], "只有管理员可以打开管理员面板") {
+		t.Fatalf("expected non-admin rejection, got %+v", sentTexts)
+	}
+
+	bot.handleCommandWithContext(42, "private", 9001, "amadmin", nil, 8, nil)
+	if len(sentTexts) < 2 || !strings.Contains(sentTexts[len(sentTexts)-1], "管理员面板") {
+		t.Fatalf("expected admin panel message, got %+v", sentTexts)
+	}
+	if len(sentMarkups) == 0 {
+		t.Fatalf("expected inline keyboard markup for admin panel")
+	}
+	lastMarkup := sentMarkups[len(sentMarkups)-1]
+	callbacks := make([]string, 0, 8)
+	for _, row := range lastMarkup.InlineKeyboard {
+		for _, button := range row {
+			callbacks = append(callbacks, button.CallbackData)
+		}
+	}
+	if !containsString(callbacks, "admin:whitelist:toggle") || !containsString(callbacks, "admin:forward:toggle") {
+		t.Fatalf("expected admin callbacks in markup, got %+v", callbacks)
+	}
+}
+
+func TestHandleCommandWithContextAmcachepushRejectsNonAdmin(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			messages = append(messages, text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		adminUsers:    map[int64]bool{9001: true},
+		forwardChatID: -1001234567890,
+	}
+
+	bot.handleCommandWithContext(42, "private", 8001, "amcachepush", nil, 7, nil)
+	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1], "只有管理员可以执行缓存转存") {
+		t.Fatalf("expected non-admin rejection, got %+v", messages)
+	}
+}
+
+func TestHandleCallbackAdminPanelTogglesModes(t *testing.T) {
+	var editedTexts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/editMessageText"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			if text, _ := payload["text"].(string); text != "" {
+				editedTexts = append(editedTexts, text)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:                "test-token",
+		apiBase:              server.URL,
+		client:               server.Client(),
+		allowedChats:         map[int64]bool{42: true},
+		adminUsers:           map[int64]bool{9001: true},
+		userWhitelistEnabled: false,
+		userWhitelist:        make(map[int64]bool),
+		userBlacklist:        make(map[int64]bool),
+		forwardChatID:        -1001234567890,
+		forwardEnabled:       false,
+		stateSave:            make(chan struct{}, 4),
+		autoDeleteMessages:   make(map[string]*time.Timer),
+		autoDeleteSticky:     make(map[string]bool),
+		autoDeleteDeadline:   make(map[string]time.Time),
+	}
+
+	bot.handleCallback(&CallbackQuery{
+		ID:   "cb-whitelist",
+		From: &User{ID: 9001},
+		Message: &Message{
+			MessageID: 11,
+			Chat:      Chat{ID: 42, Type: "private"},
+		},
+		Data: "admin:whitelist:toggle",
+	})
+	if !bot.isUserWhitelistEnabled() {
+		t.Fatalf("expected whitelist mode toggled on")
+	}
+
+	bot.handleCallback(&CallbackQuery{
+		ID:   "cb-forward",
+		From: &User{ID: 9001},
+		Message: &Message{
+			MessageID: 11,
+			Chat:      Chat{ID: 42, Type: "private"},
+		},
+		Data: "admin:forward:toggle",
+	})
+	if !bot.isForwardEnabled() {
+		t.Fatalf("expected forward mode toggled on")
+	}
+	if len(editedTexts) < 2 {
+		t.Fatalf("expected editMessageText calls, got %+v", editedTexts)
+	}
+	if !strings.Contains(editedTexts[0], "白名单模式：开启") {
+		t.Fatalf("expected whitelist edit text, got %+v", editedTexts)
+	}
+	if !strings.Contains(editedTexts[len(editedTexts)-1], "归档转发：开启") {
+		t.Fatalf("expected forward edit text, got %+v", editedTexts)
+	}
+}
+
+func TestHandleCallbackAdminForwardToggleRequiresConfiguredChat(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			if text, _ := payload["text"].(string); text != "" {
+				messages = append(messages, text)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:          "test-token",
+		apiBase:        server.URL,
+		client:         server.Client(),
+		allowedChats:   map[int64]bool{42: true},
+		adminUsers:     map[int64]bool{9001: true},
+		forwardEnabled: false,
+	}
+
+	bot.handleCallback(&CallbackQuery{
+		ID:   "cb-forward-missing-chat",
+		From: &User{ID: 9001},
+		Message: &Message{
+			MessageID: 11,
+			Chat:      Chat{ID: 42, Type: "private"},
+		},
+		Data: "admin:forward:toggle",
+	})
+
+	if bot.isForwardEnabled() {
+		t.Fatalf("expected forward mode to remain disabled when forward chat_id is missing")
+	}
+	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1], "未配置归档群 chat_id") {
+		t.Fatalf("expected missing forward chat warning, got %+v", messages)
+	}
+}
+
+func TestHandleInlineQueryRejectsUnauthorizedUser(t *testing.T) {
+	var gotResults []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		if !strings.HasSuffix(r.URL.Path, "/answerInlineQuery") {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if results, ok := payload["results"].([]any); ok {
+			gotResults = results
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:                "test-token",
+		apiBase:              server.URL,
+		client:               server.Client(),
+		userWhitelistEnabled: true,
+		userWhitelist:        map[int64]bool{},
+		userBlacklist:        map[int64]bool{},
+	}
+
+	bot.handleInlineQuery(&InlineQuery{
+		ID:    "inline-1",
+		From:  &User{ID: 12345},
+		Query: "track:123",
+	})
+
+	if len(gotResults) != 0 {
+		t.Fatalf("expected unauthorized inline query to receive empty results, got %+v", gotResults)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func mustReceiveSendAudioCall[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case call := <-ch:
+		return call
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for sendAudio call")
+		var zero T
+		return zero
+	}
+}
+
 func TestHandleMediaTransferQueuesArtistAssetsTask(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -1068,6 +1512,481 @@ func TestSendAudioFileUsesActualFormatFromMeta(t *testing.T) {
 	}
 	if _, ok := bot.getCachedAudio("track-1", bot.maxFileBytes, telegramFormatAlac); ok {
 		t.Fatalf("did not expect ALAC cache entry for AAC fallback output")
+	}
+}
+
+func TestFormatTelegramAudioCaptionIncludesMetadataLines(t *testing.T) {
+	got := formatTelegramAudioCaption(25_460_000, 852.74, telegramFormatAlac, AudioMeta{
+		Performer:  "Taylor Swift",
+		AlbumName:  "1989 (Taylor’s Version)",
+		GenreNames: []string{"Pop", "Country Pop", "Music"},
+	})
+	if !strings.Contains(got, "#AppleMusic #alac 文件大小") {
+		t.Fatalf("expected base caption header, got %q", got)
+	}
+	if !strings.Contains(got, "\n歌手：Taylor Swift\n") {
+		t.Fatalf("expected performer line, got %q", got)
+	}
+	if !strings.Contains(got, "\n专辑：1989 (Taylor’s Version)\n") {
+		t.Fatalf("expected album line, got %q", got)
+	}
+	if !strings.Contains(got, "\n风格：Pop / Country Pop\n") {
+		t.Fatalf("expected genre line, got %q", got)
+	}
+	if strings.Count(got, "via @jellyamdl_bot") != 1 {
+		t.Fatalf("expected single via line, got %q", got)
+	}
+}
+
+func TestSendAudioFileIncludesEnhancedCaptionAndCachesMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	audioPath := filepath.Join(tmpDir, "track.m4a")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	var gotCaption string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		gotCaption = r.FormValue("caption")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"audio-file","file_size":5}}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:        "test-token",
+		apiBase:      server.URL,
+		client:       server.Client(),
+		maxFileBytes: 1024,
+		cache:        map[string]CachedAudio{},
+	}
+	session := newDownloadSession(Config)
+	session.Config.EmbedLrc = true
+	session.Config.EmbedCover = true
+	session.recordDownloadedFile(audioPath, AudioMeta{
+		TrackID:        "track-1",
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		DurationMillis: 1000,
+		Format:         telegramFormatAlac,
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop", "Music"},
+		Storefront:     "us",
+	})
+
+	if err := bot.sendAudioFile(session, 42, audioPath, 0, nil, telegramFormatAlac); err != nil {
+		t.Fatalf("sendAudioFile failed: %v", err)
+	}
+
+	if !strings.Contains(gotCaption, "\n歌手：Taylor Swift\n") {
+		t.Fatalf("expected performer line in caption, got %q", gotCaption)
+	}
+	if !strings.Contains(gotCaption, "\n专辑：1989 (Taylor’s Version)\n") {
+		t.Fatalf("expected album line in caption, got %q", gotCaption)
+	}
+	if !strings.Contains(gotCaption, "\n风格：Pop\n") {
+		t.Fatalf("expected genre line in caption, got %q", gotCaption)
+	}
+
+	entry, ok := bot.getCachedAudio("track-1", bot.maxFileBytes, telegramFormatAlac)
+	if !ok {
+		t.Fatalf("expected cached audio entry")
+	}
+	if entry.AlbumName != "1989 (Taylor’s Version)" {
+		t.Fatalf("expected album cached, got %+v", entry)
+	}
+	if len(entry.GenreNames) != 1 || entry.GenreNames[0] != "Pop" {
+		t.Fatalf("expected sanitized cached genres, got %+v", entry.GenreNames)
+	}
+}
+
+func TestTelegramCacheLoadKeepsOldAudioEntryCompatibility(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "telegram-cache.json")
+	content := `{"version":4,"items":{"track-1|alac|false":{"file_id":"audio-file","file_size":123,"title":"Song","performer":"Artist"}}}`
+	if err := os.WriteFile(cachePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	bot := &TelegramBot{cacheFile: cachePath}
+	bot.loadCache()
+
+	entry, ok := bot.getCachedAudio("track-1", 0, telegramFormatAlac)
+	if !ok {
+		t.Fatalf("expected cache entry to load")
+	}
+	if entry.AlbumName != "" {
+		t.Fatalf("expected old cache entry album to remain empty, got %q", entry.AlbumName)
+	}
+	if len(entry.GenreNames) != 0 {
+		t.Fatalf("expected old cache entry genres to remain empty, got %+v", entry.GenreNames)
+	}
+}
+
+func TestSendAudioByFileIDIncludesEnhancedCaptionFromCacheEntry(t *testing.T) {
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		gotPayload = map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"audio-file","file_size":123}}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:        "test-token",
+		apiBase:      server.URL,
+		client:       server.Client(),
+		maxFileBytes: 1024,
+	}
+	err := bot.sendAudioByFileID(42, CachedAudio{
+		FileID:         "audio-file",
+		FileSize:       123,
+		Format:         telegramFormatAlac,
+		BitrateKbps:    852.74,
+		DurationMillis: 1000,
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop", "Country Pop"},
+	}, 0, "track-1")
+	if err != nil {
+		t.Fatalf("sendAudioByFileID failed: %v", err)
+	}
+
+	caption, _ := gotPayload["caption"].(string)
+	if !strings.Contains(caption, "\n歌手：Taylor Swift\n") {
+		t.Fatalf("expected performer line in caption, got %q", caption)
+	}
+	if !strings.Contains(caption, "\n专辑：1989 (Taylor’s Version)\n") {
+		t.Fatalf("expected album line in caption, got %q", caption)
+	}
+	if !strings.Contains(caption, "\n风格：Pop / Country Pop\n") {
+		t.Fatalf("expected genre line in caption, got %q", caption)
+	}
+}
+
+func TestListCachedAudioItemsPrefersCreatedAtThenUpdatedAt(t *testing.T) {
+	base := time.Now()
+	bot := &TelegramBot{
+		cache: map[string]CachedAudio{
+			"track-middle|alac|false": {
+				FileID:    "file-middle",
+				CreatedAt: base.Add(-30 * time.Minute),
+				UpdatedAt: base.Add(10 * time.Minute),
+			},
+			"track-oldest|alac|false": {
+				FileID:    "file-oldest",
+				CreatedAt: base.Add(-90 * time.Minute),
+				UpdatedAt: base.Add(20 * time.Minute),
+			},
+			"track-legacy|alac|false": {
+				FileID:    "file-legacy",
+				UpdatedAt: base.Add(-10 * time.Minute),
+			},
+		},
+	}
+
+	items := bot.listCachedAudioItems()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 cached items, got %d", len(items))
+	}
+	got := []string{items[0].TrackID, items[1].TrackID, items[2].TrackID}
+	want := []string{"track-oldest", "track-middle", "track-legacy"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected sorted track order %v, got %v", want, got)
+	}
+}
+
+func TestSendAudioFileForwardsSongAudioToArchiveChat(t *testing.T) {
+	tmpDir := t.TempDir()
+	audioPath := filepath.Join(tmpDir, "track.m4a")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	type sendAudioCall struct {
+		ChatID    int64
+		ReplyToID int
+		Audio     string
+	}
+	calls := make(chan sendAudioCall, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			call := sendAudioCall{}
+			if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data;") {
+				if err := r.ParseMultipartForm(1 << 20); err != nil {
+					t.Fatalf("ParseMultipartForm failed: %v", err)
+				}
+				call.ChatID, _ = strconv.ParseInt(r.FormValue("chat_id"), 10, 64)
+				call.ReplyToID, _ = strconv.Atoi(r.FormValue("reply_to_message_id"))
+			} else {
+				payload := map[string]any{}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode payload failed: %v", err)
+				}
+				call.ChatID = int64(payload["chat_id"].(float64))
+				call.Audio, _ = payload["audio"].(string)
+				if rawReply, ok := payload["reply_to_message_id"].(float64); ok {
+					call.ReplyToID = int(rawReply)
+				}
+			}
+			calls <- call
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"audio-file","file_size":5}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:          "test-token",
+		apiBase:        server.URL,
+		client:         server.Client(),
+		maxFileBytes:   1024,
+		forwardChatID:  -1001234567890,
+		forwardEnabled: true,
+		cache:          map[string]CachedAudio{},
+	}
+	session := newDownloadSession(Config)
+	session.recordDownloadedFile(audioPath, AudioMeta{
+		TrackID:        "track-1",
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		DurationMillis: 1000,
+		Format:         telegramFormatAlac,
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop"},
+		Storefront:     "us",
+	})
+
+	if err := bot.sendAudioFile(session, 42, audioPath, 9, nil, telegramFormatAlac); err != nil {
+		t.Fatalf("sendAudioFile failed: %v", err)
+	}
+
+	first := mustReceiveSendAudioCall(t, calls)
+	second := mustReceiveSendAudioCall(t, calls)
+	if first.ChatID != 42 {
+		t.Fatalf("expected first audio send to user chat, got %+v", first)
+	}
+	if first.ReplyToID != 9 {
+		t.Fatalf("expected original audio send to keep reply id, got %+v", first)
+	}
+	if second.ChatID != -1001234567890 {
+		t.Fatalf("expected second audio send to archive chat, got %+v", second)
+	}
+	if second.ReplyToID != 0 {
+		t.Fatalf("expected archive forward to omit reply id, got %+v", second)
+	}
+	if second.Audio != "audio-file" {
+		t.Fatalf("expected archive forward to reuse returned file_id, got %+v", second)
+	}
+}
+
+func TestSendAudioByFileIDForwardsSongAudioToArchiveChat(t *testing.T) {
+	type sendAudioCall struct {
+		ChatID    int64
+		ReplyToID int
+		Audio     string
+	}
+	calls := make(chan sendAudioCall, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			call := sendAudioCall{
+				ChatID: int64(payload["chat_id"].(float64)),
+				Audio:  payload["audio"].(string),
+			}
+			if rawReply, ok := payload["reply_to_message_id"].(float64); ok {
+				call.ReplyToID = int(rawReply)
+			}
+			calls <- call
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"cached-file","file_size":123}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:          "test-token",
+		apiBase:        server.URL,
+		client:         server.Client(),
+		forwardChatID:  -1001234567890,
+		forwardEnabled: true,
+		maxFileBytes:   1024,
+	}
+	err := bot.sendAudioByFileID(42, CachedAudio{
+		FileID:         "cached-file",
+		FileSize:       123,
+		Format:         telegramFormatAlac,
+		BitrateKbps:    852.74,
+		DurationMillis: 1000,
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop"},
+		Storefront:     "us",
+		CreatedAt:      time.Now().Add(-time.Minute),
+	}, 7, "track-1")
+	if err != nil {
+		t.Fatalf("sendAudioByFileID failed: %v", err)
+	}
+
+	first := mustReceiveSendAudioCall(t, calls)
+	second := mustReceiveSendAudioCall(t, calls)
+	if first.ChatID != 42 || first.ReplyToID != 7 {
+		t.Fatalf("expected first send to user chat with reply id, got %+v", first)
+	}
+	if second.ChatID != -1001234567890 || second.ReplyToID != 0 {
+		t.Fatalf("expected archive forward without reply id, got %+v", second)
+	}
+	if second.Audio != "cached-file" {
+		t.Fatalf("expected archive forward to reuse cache file_id, got %+v", second)
+	}
+}
+
+func TestSendAudioByFileIDWithoutSongCommentDoesNotArchiveForward(t *testing.T) {
+	var sendAudioCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			sendAudioCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"cached-file","file_size":123}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:          "test-token",
+		apiBase:        server.URL,
+		client:         server.Client(),
+		forwardChatID:  -1001234567890,
+		forwardEnabled: true,
+		maxFileBytes:   1024,
+	}
+	err := bot.sendAudioByFileIDWithoutSongComment(42, CachedAudio{
+		FileID:         "cached-file",
+		FileSize:       123,
+		Format:         telegramFormatAlac,
+		BitrateKbps:    852.74,
+		DurationMillis: 1000,
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop"},
+		Storefront:     "us",
+	}, 0, "track-1")
+	if err != nil {
+		t.Fatalf("sendAudioByFileIDWithoutSongComment failed: %v", err)
+	}
+	if got := sendAudioCount.Load(); got != 1 {
+		t.Fatalf("expected internal helper to send exactly one audio without recursive forward, got %d", got)
+	}
+}
+
+func TestHandleCommandWithContextAmcachepushPushesCachedAudioInOrder(t *testing.T) {
+	type sendAudioCall struct {
+		ChatID int64
+		Audio  string
+	}
+	calls := make(chan sendAudioCall, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			calls <- sendAudioCall{
+				ChatID: int64(payload["chat_id"].(float64)),
+				Audio:  payload["audio"].(string),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"cache-file","file_size":123}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	base := time.Now()
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		adminUsers:    map[int64]bool{9001: true},
+		forwardChatID: -1001234567890,
+		cache: map[string]CachedAudio{
+			"track-2|alac|false": {
+				FileID:         "file-2",
+				FileSize:       222,
+				Format:         telegramFormatAlac,
+				BitrateKbps:    320,
+				DurationMillis: 1000,
+				Title:          "Song 2",
+				Performer:      "Artist 2",
+				AlbumName:      "Album 2",
+				GenreNames:     []string{"Pop"},
+				Storefront:     "us",
+				CreatedAt:      base.Add(2 * time.Minute),
+			},
+			"track-1|alac|false": {
+				FileID:         "file-1",
+				FileSize:       111,
+				Format:         telegramFormatAlac,
+				BitrateKbps:    320,
+				DurationMillis: 1000,
+				Title:          "Song 1",
+				Performer:      "Artist 1",
+				AlbumName:      "Album 1",
+				GenreNames:     []string{"Rock"},
+				Storefront:     "us",
+				CreatedAt:      base.Add(-2 * time.Minute),
+			},
+		},
+	}
+
+	bot.handleCommandWithContext(42, "private", 9001, "amcachepush", nil, 0, nil)
+
+	first := mustReceiveSendAudioCall(t, calls)
+	second := mustReceiveSendAudioCall(t, calls)
+	if first.ChatID != -1001234567890 || second.ChatID != -1001234567890 {
+		t.Fatalf("expected cache push target chat to be archive group, got first=%+v second=%+v", first, second)
+	}
+	if first.Audio != "file-1" || second.Audio != "file-2" {
+		t.Fatalf("expected cache push to follow CreatedAt order, got first=%+v second=%+v", first, second)
 	}
 }
 

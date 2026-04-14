@@ -383,6 +383,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		format = defaultTelegramFormat
 	}
 	if hasMeta {
+		meta = b.enrichAudioMeta(meta)
 		if actual := normalizeTelegramFormat(meta.Format); actual != "" {
 			format = actual
 		}
@@ -457,6 +458,9 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		}
 	}
 	caption := formatTelegramCaption(sizeBytes, bitrateKbps, format)
+	if hasMeta {
+		caption = formatTelegramAudioCaption(sizeBytes, bitrateKbps, format, meta)
+	}
 	if status != nil {
 		status.Update("Uploading audio", 0, sizeBytes)
 	}
@@ -591,6 +595,27 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 			DurationMillis: durationMillis,
 			Title:          meta.Title,
 			Performer:      meta.Performer,
+			AlbumName:      meta.AlbumName,
+			GenreNames:     append([]string(nil), meta.GenreNames...),
+			Storefront:     meta.Storefront,
+			CreatedAt:      time.Now(),
+		})
+	}
+	if hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
+		b.forwardSongAudioToArchiveAsync(chatID, meta.TrackID, CachedAudio{
+			FileID:         apiResp.Result.Audio.FileID,
+			FileSize:       apiResp.Result.Audio.FileSize,
+			Compressed:     compressed,
+			Format:         format,
+			SizeBytes:      sizeBytes,
+			BitrateKbps:    bitrateKbps,
+			DurationMillis: durationMillis,
+			Title:          meta.Title,
+			Performer:      meta.Performer,
+			AlbumName:      meta.AlbumName,
+			GenreNames:     append([]string(nil), meta.GenreNames...),
+			Storefront:     meta.Storefront,
+			CreatedAt:      time.Now(),
 		})
 	}
 	if hasMeta {
@@ -1209,6 +1234,35 @@ func formatTelegramCaption(sizeBytes int64, bitrateKbps float64, format string) 
 	return fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps\nvia @jellyamdl_bot", tag, sizeMB, bitrateKbps)
 }
 
+func formatTelegramAudioCaption(sizeBytes int64, bitrateKbps float64, format string, meta AudioMeta) string {
+	sizeMB := float64(sizeBytes) / (1024.0 * 1024.0)
+	if sizeMB < 0 {
+		sizeMB = 0
+	}
+	if bitrateKbps < 0 {
+		bitrateKbps = 0
+	}
+	tag := normalizeTelegramFormat(format)
+	if tag == "" {
+		tag = defaultTelegramFormat
+	}
+	lines := []string{fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps", tag, sizeMB, bitrateKbps)}
+	performer := strings.TrimSpace(meta.Performer)
+	if performer != "" {
+		lines = append(lines, "歌手："+performer)
+	}
+	albumName := strings.TrimSpace(meta.AlbumName)
+	if albumName != "" {
+		lines = append(lines, "专辑："+albumName)
+	}
+	filteredGenres := compactTelegramGenreNames(meta.GenreNames)
+	if len(filteredGenres) > 0 {
+		lines = append(lines, "风格："+strings.Join(filteredGenres, " / "))
+	}
+	lines = append(lines, "via @jellyamdl_bot")
+	return strings.Join(lines, "\n")
+}
+
 func extractInlineTrackID(query string) string {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
@@ -1478,6 +1532,50 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 }
 
 func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyToID int, trackID string) error {
+	return b.sendAudioByFileIDWithOptions(chatID, entry, replyToID, trackID, true, true)
+}
+
+func (b *TelegramBot) sendAudioByFileIDWithoutSongComment(chatID int64, entry CachedAudio, replyToID int, trackID string) error {
+	return b.sendAudioByFileIDWithOptions(chatID, entry, replyToID, trackID, false, false)
+}
+
+func cloneCachedAudioEntry(entry CachedAudio) CachedAudio {
+	entry.GenreNames = append([]string(nil), entry.GenreNames...)
+	return entry
+}
+
+func (b *TelegramBot) shouldForwardSongAudio(sourceChatID int64) bool {
+	if b == nil || sourceChatID == 0 {
+		return false
+	}
+	targetChatID := b.forwardChatID
+	if targetChatID == 0 || sourceChatID == targetChatID {
+		return false
+	}
+	return b.isForwardEnabled()
+}
+
+func (b *TelegramBot) forwardSongAudioToArchiveAsync(sourceChatID int64, trackID string, entry CachedAudio) {
+	if !b.shouldForwardSongAudio(sourceChatID) {
+		return
+	}
+	targetChatID := b.forwardChatID
+	if targetChatID == 0 || strings.TrimSpace(entry.FileID) == "" {
+		return
+	}
+	forwardEntry := cloneCachedAudioEntry(entry)
+	trackID = strings.TrimSpace(trackID)
+	go func() {
+		runWithRecovery("telegram archive forward", nil, func() {
+			if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, forwardEntry, 0, trackID); err != nil {
+				fmt.Printf("telegram archive forward failed source=%d target=%d track=%s err=%v\n", sourceChatID, targetChatID, trackID, err)
+				appendRuntimeErrorLogf("telegram archive forward failed source=%d target=%d track=%s err=%v", sourceChatID, targetChatID, trackID, err)
+			}
+		})
+	}()
+}
+
+func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAudio, replyToID int, trackID string, enableSongComment bool, enableArchiveForward bool) error {
 	entry = b.enrichCachedAudio(trackID, entry)
 	ctx := b.operationContext()
 	if err := b.waitTelegramSend(ctx, chatID); err != nil {
@@ -1492,7 +1590,16 @@ func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyTo
 	if format == "" {
 		format = defaultTelegramFormat
 	}
-	caption := formatTelegramCaption(sizeBytes, bitrateKbps, format)
+	caption := formatTelegramAudioCaption(sizeBytes, bitrateKbps, format, AudioMeta{
+		TrackID:        strings.TrimSpace(trackID),
+		Title:          strings.TrimSpace(entry.Title),
+		Performer:      strings.TrimSpace(entry.Performer),
+		DurationMillis: entry.DurationMillis,
+		AlbumName:      strings.TrimSpace(entry.AlbumName),
+		GenreNames:     append([]string(nil), entry.GenreNames...),
+		Storefront:     strings.TrimSpace(entry.Storefront),
+		Format:         format,
+	})
 	payload := map[string]any{
 		"chat_id": chatID,
 		"audio":   entry.FileID,
@@ -1536,11 +1643,29 @@ func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyTo
 		b.noteTelegramRateLimit(err)
 		return err
 	}
-	b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, AudioMeta{
-		TrackID:   strings.TrimSpace(trackID),
-		Title:     strings.TrimSpace(entry.Title),
-		Performer: strings.TrimSpace(entry.Performer),
-		Format:    format,
-	})
+	if enableArchiveForward {
+		forwardEntry := cloneCachedAudioEntry(entry)
+		if strings.TrimSpace(apiResp.Result.Audio.FileID) != "" {
+			forwardEntry.FileID = strings.TrimSpace(apiResp.Result.Audio.FileID)
+		}
+		if apiResp.Result.Audio.FileSize > 0 {
+			forwardEntry.FileSize = apiResp.Result.Audio.FileSize
+			if forwardEntry.SizeBytes <= 0 {
+				forwardEntry.SizeBytes = apiResp.Result.Audio.FileSize
+			}
+		}
+		if forwardEntry.CreatedAt.IsZero() {
+			forwardEntry.CreatedAt = time.Now()
+		}
+		b.forwardSongAudioToArchiveAsync(chatID, trackID, forwardEntry)
+	}
+	if enableSongComment {
+		b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, AudioMeta{
+			TrackID:   strings.TrimSpace(trackID),
+			Title:     strings.TrimSpace(entry.Title),
+			Performer: strings.TrimSpace(entry.Performer),
+			Format:    format,
+		})
+	}
 	return nil
 }

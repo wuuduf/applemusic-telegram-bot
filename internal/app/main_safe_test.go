@@ -1734,26 +1734,53 @@ func TestBuildTransferKeyboardLocalizedAndCross(t *testing.T) {
 
 func TestBuildArtistModeKeyboardIncludesAllSongs(t *testing.T) {
 	zh := buildArtistModeKeyboard(telegramLanguageZh)
-	if got := zh.InlineKeyboard[0][2].Text; got != "全部歌曲" {
-		t.Fatalf("expected zh all songs label, got %q", got)
+	findButton := func(rows [][]InlineKeyboardButton, callback string) *InlineKeyboardButton {
+		for i := range rows {
+			for j := range rows[i] {
+				if rows[i][j].CallbackData == callback {
+					return &rows[i][j]
+				}
+			}
+		}
+		return nil
 	}
-	if got := zh.InlineKeyboard[0][2].CallbackData; got != "artist_rel:songs" {
-		t.Fatalf("expected songs callback, got %q", got)
+	if button := findButton(zh.InlineKeyboard, "artist_rel:songs"); button == nil || button.Text != "全部歌曲" {
+		if button == nil {
+			t.Fatalf("expected zh all songs button")
+		}
+		t.Fatalf("expected zh all songs label, got %q", button.Text)
+	}
+	if button := findButton(zh.InlineKeyboard, "artist_rel:full-albums"); button == nil || button.Text != "全部LP" {
+		if button == nil {
+			t.Fatalf("expected zh all LPs button")
+		}
+		t.Fatalf("expected zh all LPs label, got %q", button.Text)
 	}
 
 	en := buildArtistModeKeyboard(telegramLanguageEn)
-	if got := en.InlineKeyboard[0][2].Text; got != "All Songs" {
-		t.Fatalf("expected en all songs label, got %q", got)
+	if button := findButton(en.InlineKeyboard, "artist_rel:songs"); button == nil || button.Text != "All Songs" {
+		if button == nil {
+			t.Fatalf("expected en all songs button")
+		}
+		t.Fatalf("expected en all songs label, got %q", button.Text)
+	}
+	if button := findButton(en.InlineKeyboard, "artist_rel:full-albums"); button == nil || button.Text != "All LPs" {
+		if button == nil {
+			t.Fatalf("expected en all LPs button")
+		}
+		t.Fatalf("expected en all LPs label, got %q", button.Text)
 	}
 }
 
 func TestNormalizeArtistRelationshipIncludesSongs(t *testing.T) {
 	tests := map[string]string{
-		"albums":   "albums",
-		"mv":       "music-videos",
-		"song":     "songs",
-		"allsongs": "songs",
-		"unknown":  "",
+		"albums":      "albums",
+		"mv":          "music-videos",
+		"song":        "songs",
+		"allsongs":    "songs",
+		"full-albums": "full-albums",
+		"all-lps":     "full-albums",
+		"unknown":     "",
 	}
 	for input, want := range tests {
 		if got := normalizeArtistRelationship(input); got != want {

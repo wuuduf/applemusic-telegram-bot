@@ -577,7 +577,7 @@ func (b *TelegramBot) buildRecoveredDownloadRequest(request telegramPersistedReq
 	return req, nil
 }
 
-func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, storefront string) (func(session *DownloadSession) error, error) {
+func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, storefront string, transferMode string) (func(session *DownloadSession) error, error) {
 	switch mediaType {
 	case mediaTypeSong:
 		return func(session *DownloadSession) error {
@@ -598,6 +598,10 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 	case mediaTypeArtistSongs:
 		return func(session *DownloadSession) error {
 			return b.downloadArtistSongsCollection(session, mediaID, storefront)
+		}, nil
+	case mediaTypeArtistLPs:
+		return func(session *DownloadSession) error {
+			return b.stageArtistLPAlbumsCollection(session, mediaID, storefront)
 		}, nil
 	case mediaTypeMusicVideo:
 		saveDir := strings.TrimSpace(Config.AlacSaveFolder)

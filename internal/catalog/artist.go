@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 )
@@ -20,7 +19,7 @@ type ArtistRelationshipItem struct {
 	AlbumName     string
 }
 
-type artistRelationshipPage struct {
+type artistCollectionPage struct {
 	Next string `json:"next"`
 	Data []struct {
 		ID         string `json:"id"`
@@ -47,8 +46,8 @@ type artistRelationshipPage struct {
 	} `json:"data"`
 }
 
-func artistRelationshipPageLimit(relationship string) int {
-	switch strings.ToLower(strings.TrimSpace(relationship)) {
+func artistCollectionPageLimit(endpoint string) int {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(endpoint), "/")) {
 	case "songs":
 		return 20
 	default:
@@ -56,7 +55,11 @@ func artistRelationshipPageLimit(relationship string) int {
 	}
 }
 
-func artistRelationshipNextURL(storefront string, artistID string, relationship string, nextPath string) string {
+func artistCollectionEndpointURL(storefront string, artistID string, endpoint string) string {
+	return fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, strings.Trim(strings.TrimSpace(endpoint), "/"))
+}
+
+func artistCollectionNextURL(pageURL string, nextPath string) string {
 	nextPath = strings.TrimSpace(nextPath)
 	if nextPath == "" {
 		return ""
@@ -64,29 +67,33 @@ func artistRelationshipNextURL(storefront string, artistID string, relationship 
 	if strings.HasPrefix(nextPath, "http://") || strings.HasPrefix(nextPath, "https://") {
 		return nextPath
 	}
-	if strings.HasPrefix(nextPath, "/") {
-		return "https://amp-api.music.apple.com" + nextPath
-	}
-	base := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, relationship)
-	baseURL, err := url.Parse(base)
+	baseURL, err := url.Parse(strings.TrimSpace(pageURL))
 	if err != nil {
-		return base
+		if strings.HasPrefix(nextPath, "/") {
+			return "https://amp-api.music.apple.com" + nextPath
+		}
+		return strings.TrimSpace(pageURL)
 	}
-	baseURL.Path = path.Join(path.Dir(baseURL.Path), nextPath)
-	baseURL.RawQuery = ""
-	return baseURL.String()
+	nextURL, err := url.Parse(nextPath)
+	if err != nil {
+		if strings.HasPrefix(nextPath, "/") {
+			return "https://amp-api.music.apple.com" + nextPath
+		}
+		return strings.TrimSpace(pageURL)
+	}
+	return baseURL.ResolveReference(nextURL).String()
 }
 
-func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string, relationship string) ([]ArtistRelationshipItem, error) {
+func (s *Service) fetchArtistCollectionAll(storefront string, artistID string, endpoint string) ([]ArtistRelationshipItem, error) {
 	storefront = strings.TrimSpace(storefront)
 	artistID = strings.TrimSpace(artistID)
-	relationship = strings.TrimSpace(relationship)
-	if storefront == "" || artistID == "" || relationship == "" {
-		return nil, fmt.Errorf("invalid artist relationship query")
+	endpoint = strings.Trim(strings.TrimSpace(endpoint), "/")
+	if storefront == "" || artistID == "" || endpoint == "" {
+		return nil, fmt.Errorf("invalid artist collection query")
 	}
 
-	pageURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s/%s", storefront, artistID, relationship)
-	pageLimit := artistRelationshipPageLimit(relationship)
+	pageURL := artistCollectionEndpointURL(storefront, artistID, endpoint)
+	pageLimit := artistCollectionPageLimit(endpoint)
 	apiOffset := 0
 	items := make([]ArtistRelationshipItem, 0)
 	for {
@@ -115,10 +122,10 @@ func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string,
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, fmt.Errorf("artist %s request failed: %s", relationship, resp.Status)
+			return nil, fmt.Errorf("artist %s request failed: %s", endpoint, resp.Status)
 		}
 
-		page := new(artistRelationshipPage)
+		page := new(artistCollectionPage)
 		if err := json.NewDecoder(resp.Body).Decode(page); err != nil {
 			resp.Body.Close()
 			return nil, err
@@ -140,8 +147,24 @@ func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string,
 		if page.Next == "" {
 			break
 		}
-		pageURL = artistRelationshipNextURL(storefront, artistID, relationship, page.Next)
+		pageURL = artistCollectionNextURL(pageURL, page.Next)
 		apiOffset += pageLimit
 	}
 	return items, nil
+}
+
+func (s *Service) FetchArtistRelationshipAll(storefront string, artistID string, relationship string) ([]ArtistRelationshipItem, error) {
+	relationship = strings.TrimSpace(relationship)
+	if relationship == "" {
+		return nil, fmt.Errorf("invalid artist relationship query")
+	}
+	return s.fetchArtistCollectionAll(storefront, artistID, relationship)
+}
+
+func (s *Service) FetchArtistViewAll(storefront string, artistID string, view string) ([]ArtistRelationshipItem, error) {
+	view = strings.Trim(strings.TrimSpace(view), "/")
+	if view == "" {
+		return nil, fmt.Errorf("invalid artist view query")
+	}
+	return s.fetchArtistCollectionAll(storefront, artistID, "view/"+view)
 }

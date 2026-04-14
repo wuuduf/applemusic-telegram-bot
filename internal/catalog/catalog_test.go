@@ -169,6 +169,67 @@ func TestFetchArtistRelationshipAllSongsUsesRelationshipLimitAndNextOffset(t *te
 	}
 }
 
+func TestFetchArtistViewAllFullAlbumsUsesViewEndpointAndRelativeNext(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		requests++
+		if want := "/v1/catalog/cn/artists/artist-1/view/full-albums"; r.URL.Path != want {
+			t.Fatalf("unexpected path: got %q want %q", r.URL.Path, want)
+		}
+		offset := r.URL.Query().Get("offset")
+		limit := r.URL.Query().Get("limit")
+		lang := r.URL.Query().Get("l")
+		switch requests {
+		case 1:
+			if offset != "0" {
+				t.Fatalf("expected first full-albums offset=0, got %q", offset)
+			}
+			if limit != "100" {
+				t.Fatalf("expected first full-albums limit=100, got %q", limit)
+			}
+			if lang != "zh-Hans" {
+				t.Fatalf("expected first full-albums language=zh-Hans, got %q", lang)
+			}
+			_, _ = io.WriteString(w, `{"next":"full-albums?offset=100","data":[{"id":"album-1","attributes":{"name":"Album One","url":"https://example.com/album-1","releaseDate":"2024-01-01","artistName":"Artist One","albumName":"Album One"}}]}`)
+		case 2:
+			if offset != "100" {
+				t.Fatalf("expected second full-albums offset=100, got %q", offset)
+			}
+			if limit != "100" {
+				t.Fatalf("expected second full-albums limit=100, got %q", limit)
+			}
+			if lang != "zh-Hans" {
+				t.Fatalf("expected second full-albums language=zh-Hans, got %q", lang)
+			}
+			_, _ = io.WriteString(w, `{"data":[{"id":"album-2","attributes":{"name":"Album Two","url":"https://example.com/album-2","releaseDate":"2025-01-01","artistName":"Artist One","albumName":"Album Two"}}]}`)
+		default:
+			t.Fatalf("unexpected request count: %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{
+		AppleToken: "token",
+		Language:   "zh-Hans",
+		HTTPClient: client,
+		UserAgent:  defaultUserAgent,
+	}
+
+	items, err := service.FetchArtistViewAll("cn", "artist-1", "full-albums")
+	if err != nil {
+		t.Fatalf("FetchArtistViewAll full-albums failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 full-albums items, got %d", len(items))
+	}
+	if items[0].ID != "album-1" || items[1].ID != "album-2" {
+		t.Fatalf("unexpected full-albums items: %#v", items)
+	}
+}
+
 func TestExportAlbumLyricsWritesFilesAndCountsFailures(t *testing.T) {
 	tmpDir := t.TempDir()
 	service := &Service{

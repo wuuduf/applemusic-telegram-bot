@@ -2964,6 +2964,26 @@ func TestResolveCommandTargetRejectsTraversalMediaID(t *testing.T) {
 	}
 }
 
+func TestParseAppleMusicURLCurator(t *testing.T) {
+	t.Parallel()
+	target, err := parseAppleMusicURL("https://music.apple.com/us/curator/100-best-albums/1702073195?l=zh-Hans-CN")
+	if err != nil {
+		t.Fatalf("parseAppleMusicURL curator failed: %v", err)
+	}
+	if target == nil {
+		t.Fatalf("expected curator target")
+	}
+	if target.MediaType != mediaTypeCurator {
+		t.Fatalf("unexpected media type: %q", target.MediaType)
+	}
+	if target.Storefront != "us" {
+		t.Fatalf("unexpected storefront: %q", target.Storefront)
+	}
+	if target.ID != "1702073195" {
+		t.Fatalf("unexpected curator id: %q", target.ID)
+	}
+}
+
 func TestJoinFileWithinRootRejectsEscapingPaths(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

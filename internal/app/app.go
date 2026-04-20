@@ -549,6 +549,17 @@ func checkUrlArtist(url string) (string, string) {
 	}
 }
 
+func checkUrlCurator(url string) (string, string) {
+	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/curator|\/curator\/.+))\/(?:id)?([A-Za-z0-9._-]+)(?:$|\?)`)
+	matches := pat.FindAllStringSubmatch(url, -1)
+
+	if matches == nil {
+		return "", ""
+	} else {
+		return matches[0][1], matches[0][2]
+	}
+}
+
 type AppleURLTarget struct {
 	MediaType  string
 	Storefront string
@@ -575,6 +586,9 @@ func parseAppleMusicURL(raw string) (*AppleURLTarget, error) {
 	}
 	if storefront, id := checkUrlArtist(cleaned); storefront != "" && id != "" {
 		return &AppleURLTarget{MediaType: mediaTypeArtist, Storefront: storefront, ID: id, RawURL: cleaned}, nil
+	}
+	if storefront, id := checkUrlCurator(cleaned); storefront != "" && id != "" {
+		return &AppleURLTarget{MediaType: mediaTypeCurator, Storefront: storefront, ID: id, RawURL: cleaned}, nil
 	}
 	if storefront, id := checkUrl(cleaned); storefront != "" && id != "" {
 		parseResult, err := url.Parse(cleaned)
@@ -647,6 +661,20 @@ func getUrlArtistName(artistUrl string, token string) (string, string, error) {
 		return "", "", err
 	}
 	return name, artistId, nil
+}
+
+func getUrlCuratorName(curatorURL string, token string) (string, string, error) {
+	storefront, curatorID := checkUrlCurator(curatorURL)
+	if storefront == "" || curatorID == "" {
+		return "", "", fmt.Errorf("invalid curator url")
+	}
+	service := catalogServiceForToken(token, "main.curator")
+	service.Language = Config.Language
+	name, err := service.FetchCuratorName(storefront, curatorID)
+	if err != nil {
+		return "", "", err
+	}
+	return name, curatorID, nil
 }
 
 func checkArtist(artistUrl string, token string, relationship string) ([]string, error) {
@@ -1624,8 +1652,10 @@ const (
 	mediaTypeStation     = "station"
 	mediaTypeMusicVideo  = "music-video"
 	mediaTypeArtist      = "artist"
+	mediaTypeCurator     = "curator"
 	mediaTypeArtistSongs = "artist-songs"
 	mediaTypeArtistLPs   = "artist-lp-albums"
+	mediaTypeCuratorLPs  = "curator-albums"
 	mediaTypeAlbumLyrics = "album-lyrics"
 	mediaTypeArtistAsset = "artist-asset"
 )
@@ -1690,7 +1720,7 @@ func normalizeTelegramTaskType(taskType string) string {
 
 func telegramMediaProducesSongAudio(mediaType string) bool {
 	switch mediaType {
-	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs, mediaTypeArtistLPs:
+	case mediaTypeSong, mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs, mediaTypeArtistLPs, mediaTypeCuratorLPs:
 		return true
 	default:
 		return false
@@ -4044,6 +4074,14 @@ func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, ta
 			}
 		}
 		b.startArtistSelection(chatID, target.ID, artistName, storefront, replyToID)
+	case mediaTypeCurator:
+		curatorName := ""
+		if target.RawURL != "" {
+			if name, _, err := getUrlCuratorName(target.RawURL, b.appleToken); err == nil {
+				curatorName = name
+			}
+		}
+		b.promptMediaTransfer(chatID, mediaTypeCuratorLPs, target.ID, storefront, curatorName, replyToID, forceRefresh)
 	default:
 		_ = b.sendMessageWithReply(chatID, "Unsupported Apple Music URL type.", nil, replyToID)
 	}
@@ -4081,6 +4119,10 @@ func normalizeCommandMediaType(raw string) string {
 		return mediaTypeMusicVideo
 	case mediaTypeArtist, "artists":
 		return mediaTypeArtist
+	case mediaTypeCurator, "curators":
+		return mediaTypeCurator
+	case mediaTypeCuratorLPs:
+		return mediaTypeCuratorLPs
 	default:
 		return ""
 	}
@@ -4488,6 +4530,43 @@ func (b *TelegramBot) fetchArtistLPAlbums(storefront string, artistID string) ([
 	return collectUniqueArtistCollectionItems(related), nil
 }
 
+func collectUniqueCuratorAlbumItems(items []sharedcatalog.CuratorAlbumItem) []sharedcatalog.CuratorAlbumItem {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	filtered := make([]sharedcatalog.CuratorAlbumItem, 0, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func (b *TelegramBot) fetchCuratorAlbums(storefront string, curatorID string) ([]sharedcatalog.CuratorAlbumItem, error) {
+	curatorID = strings.TrimSpace(curatorID)
+	if curatorID == "" {
+		return nil, fmt.Errorf("curator id is empty")
+	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	service := b.catalogService()
+	service.Language = b.searchLanguage()
+	albums, err := service.FetchCuratorAlbums(storefront, curatorID)
+	if err != nil {
+		return nil, err
+	}
+	return collectUniqueCuratorAlbumItems(albums), nil
+}
+
 func buildArtistSongTrackStubs(trackIDs []string) []task.Track {
 	if len(trackIDs) == 0 {
 		return nil
@@ -4534,6 +4613,36 @@ func (b *TelegramBot) stageArtistLPAlbumsCollection(session *DownloadSession, ar
 	return nil
 }
 
+func (b *TelegramBot) stageCuratorAlbumsCollection(session *DownloadSession, curatorID string, storefront string) error {
+	if session == nil {
+		return fmt.Errorf("download session is nil")
+	}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	albums, err := b.fetchCuratorAlbums(storefront, curatorID)
+	if err != nil {
+		return err
+	}
+	for _, album := range albums {
+		if err := session.downloadContext().Err(); err != nil {
+			return err
+		}
+		albumID := strings.TrimSpace(album.ID)
+		if albumID == "" {
+			continue
+		}
+		if err := ripAlbum(session, albumID, b.appleToken, storefront, session.Config.MediaUserToken, ""); err != nil {
+			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
+				return ctxErr
+			}
+			fmt.Printf("Failed to rip curator album %s: %v\n", albumID, err)
+			session.Counter.Error++
+		}
+	}
+	return nil
+}
+
 func (b *TelegramBot) downloadArtistSongsCollection(session *DownloadSession, artistID string, storefront string) error {
 	if session == nil {
 		return fmt.Errorf("download session is nil")
@@ -4560,7 +4669,7 @@ func (b *TelegramBot) downloadArtistSongsCollection(session *DownloadSession, ar
 	return nil
 }
 
-type artistLPDownloadResult struct {
+type albumCollectionDownloadResult struct {
 	Total     int
 	Succeeded int
 	Failed    int
@@ -4568,6 +4677,14 @@ type artistLPDownloadResult struct {
 }
 
 func formatArtistLPAlbumProgress(index int, total int, album sharedcatalog.ArtistRelationshipItem) string {
+	albumName := strings.TrimSpace(album.Name)
+	if albumName == "" {
+		albumName = "album " + strings.TrimSpace(album.ID)
+	}
+	return fmt.Sprintf("Album %d/%d · %s", index+1, total, albumName)
+}
+
+func formatCuratorAlbumProgress(index int, total int, album sharedcatalog.CuratorAlbumItem) string {
 	albumName := strings.TrimSpace(album.Name)
 	if albumName == "" {
 		albumName = "album " + strings.TrimSpace(album.ID)
@@ -4688,8 +4805,8 @@ func (b *TelegramBot) runArtistLPAlbumTransfer(chatID int64, replyToID int, forc
 	}
 }
 
-func (b *TelegramBot) downloadArtistLPAlbumsCollection(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, artistID string, storefront string, transferMode string, status *DownloadStatus) (artistLPDownloadResult, error) {
-	result := artistLPDownloadResult{}
+func (b *TelegramBot) downloadArtistLPAlbumsCollection(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, artistID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {
+	result := albumCollectionDownloadResult{}
 	if storefront == "" {
 		storefront = Config.Storefront
 	}
@@ -4734,6 +4851,74 @@ func (b *TelegramBot) downloadArtistLPAlbumsCollection(chatID int64, replyToID i
 			sanitized := sanitizeTelegramError(albumErr, b.token)
 			fmt.Printf("artist LP album failed artist=%s album=%s transfer=%s: %s\n", artistID, albumID, transferMode, sanitized)
 			appendRuntimeErrorLogf("artist LP album failed artist=%s album=%s transfer=%s: %s", artistID, albumID, transferMode, sanitized)
+			if status != nil {
+				status.UpdateSync(fmt.Sprintf("%s failed: %v", albumProgressLabel, albumErr), int64(idx+1), int64(len(albums)))
+			}
+			continue
+		}
+		if sentAny {
+			result.SentAny = true
+			result.Succeeded++
+		} else {
+			result.Failed++
+			if status != nil {
+				status.UpdateSync(albumProgressLabel+" (no upload success)", int64(idx+1), int64(len(albums)))
+			}
+			continue
+		}
+		if status != nil {
+			status.UpdateSync(albumProgressLabel, int64(idx+1), int64(len(albums)))
+		}
+	}
+	return result, nil
+}
+
+func (b *TelegramBot) downloadCuratorAlbumsCollection(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, curatorID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {
+	result := albumCollectionDownloadResult{}
+	if storefront == "" {
+		storefront = Config.Storefront
+	}
+	albums, err := b.fetchCuratorAlbums(storefront, curatorID)
+	if err != nil {
+		return result, err
+	}
+	result.Total = len(albums)
+	if len(albums) == 0 {
+		return result, errNoFilesDownloaded
+	}
+
+	for idx, album := range albums {
+		if err := b.operationContext().Err(); err != nil {
+			return result, err
+		}
+		albumID := strings.TrimSpace(album.ID)
+		if albumID == "" {
+			result.Failed++
+			continue
+		}
+		albumProgressLabel := formatCuratorAlbumProgress(idx, len(albums), album)
+		if status != nil {
+			status.UpdateSync(albumProgressLabel, int64(idx), int64(len(albums)))
+		}
+		albumProgress := func(phase string, done, total int64) {
+			if status == nil {
+				return
+			}
+			phase = strings.TrimSpace(phase)
+			if phase == "" {
+				phase = "Working"
+			}
+			status.Update(albumProgressLabel+" · "+phase, done, total)
+		}
+		sentAny, albumErr := b.runArtistLPAlbumTransfer(chatID, replyToID, forceRefresh, settings, transferMode, albumID, storefront, status, albumProgressLabel, albumProgress)
+		if albumErr != nil {
+			if isContextCancellationError(albumErr) {
+				return result, albumErr
+			}
+			result.Failed++
+			sanitized := sanitizeTelegramError(albumErr, b.token)
+			fmt.Printf("curator album failed curator=%s album=%s transfer=%s: %s\n", curatorID, albumID, transferMode, sanitized)
+			appendRuntimeErrorLogf("curator album failed curator=%s album=%s transfer=%s: %s", curatorID, albumID, transferMode, sanitized)
 			if status != nil {
 				status.UpdateSync(fmt.Sprintf("%s failed: %v", albumProgressLabel, albumErr), int64(idx+1), int64(len(albums)))
 			}
@@ -5626,7 +5811,7 @@ func (b *TelegramBot) handleMediaTransfer(chatID int64, messageID int, mode stri
 		}
 		b.enqueueCollectionDownload(chatID, mediaType, mediaID, pending.Storefront, replyToID, transferModeOneByOne, pending.ForceRefresh)
 	case transferModeZip:
-		allowCollectionZipCache := mediaType != mediaTypeArtistLPs
+		allowCollectionZipCache := mediaType != mediaTypeArtistLPs && mediaType != mediaTypeCuratorLPs
 		if mediaType == mediaTypeSong {
 			if !pending.ForceRefresh && b.trySendCachedBundleZip(chatID, mediaType, mediaID, replyToID, settings) {
 				_ = b.editMessageText(chatID, messageID, "Transfer mode: ZIP (cached).", nil)
@@ -6134,6 +6319,10 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	case mediaTypeArtistLPs:
 		enqueueWithRollback(func(session *DownloadSession) error {
 			return b.stageArtistLPAlbumsCollection(session, mediaID, storefront)
+		})
+	case mediaTypeCuratorLPs:
+		enqueueWithRollback(func(session *DownloadSession) error {
+			return b.stageCuratorAlbumsCollection(session, mediaID, storefront)
 		})
 	default:
 		b.releaseInflightDownload(inflightKey)
@@ -6754,6 +6943,31 @@ func (b *TelegramBot) runDownload(chatID int64, fn func(session *DownloadSession
 		} else {
 			taskResult = "no-upload-success(lp)"
 			status.UpdateSync("No LP was uploaded successfully.", 0, 0)
+		}
+		return
+	}
+	if mediaType == mediaTypeCuratorLPs {
+		result, curatorErr := b.downloadCuratorAlbumsCollection(chatID, replyToID, forceRefresh, settings, mediaID, storefront, transferMode, status)
+		if curatorErr != nil {
+			if errors.Is(curatorErr, errNoFilesDownloaded) {
+				taskResult = "no-files(curator)"
+				status.UpdateSync("No files were downloaded.", 0, 0)
+				return
+			}
+			taskResult = fmt.Sprintf("failed(curator): %s", sanitizeTelegramError(curatorErr, b.token))
+			status.UpdateSync(fmt.Sprintf("Failed: %v", curatorErr), 0, 0)
+			return
+		}
+		if result.Failed > 0 {
+			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Curator albums finished: success=%d/%d, failed=%d.", result.Succeeded, result.Total, result.Failed), nil, replyToID)
+		}
+		if result.SentAny {
+			taskResult = "success(curator)"
+			completed = true
+			status.finishSuccess()
+		} else {
+			taskResult = "no-upload-success(curator)"
+			status.UpdateSync("No curator album was uploaded successfully.", 0, 0)
 		}
 		return
 	}
@@ -8411,7 +8625,7 @@ func botHelpText() string {
 - /st 赏析：comment | comment_on | comment_off
 
 也支持直接发送 Apple Music 链接（自动识别）：
-song | album | playlist | artist | station | music-video
+song | album | playlist | artist | station | music-video | curator
 `)
 }
 
@@ -8451,7 +8665,7 @@ Parameters:
 - /st song comment: comment | comment_on | comment_off
 
 You can also send Apple Music URLs directly (auto recognized):
-song | album | playlist | artist | station | music-video
+song | album | playlist | artist | station | music-video | curator
 `)
 	}
 	return botHelpText()

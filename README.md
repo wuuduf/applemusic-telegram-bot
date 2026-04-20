@@ -1,6 +1,6 @@
 # Apple Music Telegram Bot (Go)
 
-面向 Telegram 场景的 Apple Music 下载机器人，支持 `song / album / playlist / station / music-video / artist`。
+面向 Telegram 场景的 Apple Music 下载机器人，支持 `song / album / playlist / station / music-video / artist / curator`。
 
 ## 项目关系（继承链）
 
@@ -17,7 +17,7 @@
 
 ## 核心能力
 
-- 下载类型：`song` / `album` / `playlist` / `station` / `music-video`
+- 下载类型：`song` / `album` / `playlist` / `station` / `music-video` / `curator(展开专辑列表)`
 - 扩展任务：封面、动态封面、歌词导出、艺人资源导出
 - 发送策略：逐个发送 / ZIP 发送（超限自动回退）
 - Telegram `file_id` 缓存复用（音频 / 视频 / ZIP）

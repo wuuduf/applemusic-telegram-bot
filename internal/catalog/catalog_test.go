@@ -247,6 +247,186 @@ func TestFetchArtistViewAllFullAlbumsUsesViewEndpointAndRelativeNext(t *testing.
 	}
 }
 
+func TestFetchCuratorName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/catalog/us"; r.URL.Path != want {
+			t.Fatalf("unexpected path: got %q want %q", r.URL.Path, want)
+		}
+		if got := r.URL.Query().Get("ids[curators]"); got != "1702073195" {
+			t.Fatalf("unexpected curator id query: %q", got)
+		}
+		if got := r.URL.Query().Get("ids[apple-curators]"); got != "1702073195" {
+			t.Fatalf("unexpected apple-curator id query: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"1702073195","type":"apple-curators","attributes":{"name":"100 Best Albums","url":"https://example.com/curator/1702073195"}}]}`)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{
+		AppleToken: "token",
+		HTTPClient: client,
+		UserAgent:  defaultUserAgent,
+	}
+
+	name, err := service.FetchCuratorName("us", "1702073195")
+	if err != nil {
+		t.Fatalf("FetchCuratorName failed: %v", err)
+	}
+	if name != "100 Best Albums" {
+		t.Fatalf("unexpected curator name: %q", name)
+	}
+}
+
+func TestFetchCuratorAlbumsCollectsInlineAndRoomAlbums(t *testing.T) {
+	roomTwoRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/catalog/us":
+			if got := r.URL.Query().Get("l"); got != "zh-Hans" {
+				t.Fatalf("expected curator language=zh-Hans, got %q", got)
+			}
+			_, _ = io.WriteString(w, `{
+				"data":[
+					{
+						"id":"1702073195",
+						"type":"apple-curators",
+						"attributes":{"name":"100 Best Albums"},
+						"relationships":{
+							"grouping":{
+								"data":[
+									{
+										"id":"group-1",
+										"type":"groupings",
+										"relationships":{
+											"tabs":{
+												"data":[
+													{
+														"id":"default",
+														"type":"editorial-elements",
+														"relationships":{
+															"children":{
+																"data":[
+																	{
+																		"id":"albums-inline",
+																		"type":"editorial-elements",
+																		"attributes":{"name":"Albums Inline","resourceTypes":["albums"]},
+																		"relationships":{
+																			"contents":{"data":[
+																				{"id":"album-inline-1","type":"albums","attributes":{"name":"Inline Album 1","artistName":"Artist 1","url":"https://example.com/albums/1","releaseDate":"2024-01-01"}},
+																				{"id":"album-inline-2","type":"albums","attributes":{"name":"Inline Album 2","artistName":"Artist 2","url":"https://example.com/albums/2","releaseDate":"2024-02-02"}}
+																			]},
+																			"room":{"data":[{"id":"room-albums-1","type":"rooms"}]}
+																		}
+																	},
+																	{
+																		"id":"stations-only",
+																		"type":"editorial-elements",
+																		"attributes":{"name":"Stations Only","resourceTypes":["stations"]},
+																		"relationships":{
+																			"contents":{"data":[{"id":"station-1","type":"stations"}]},
+																			"room":{"data":[{"id":"room-stations-1","type":"rooms"}]}
+																		}
+																	},
+																	{
+																		"id":"albums-room-only",
+																		"type":"editorial-elements",
+																		"attributes":{"name":"Albums Room Only"},
+																		"relationships":{
+																			"contents":{"data":[{"id":"album-inline-1","type":"albums","attributes":{"name":"Inline Album 1 Duplicate","artistName":"Artist 1"}}]},
+																			"room":{"data":[{"id":"room-albums-2","type":"rooms"}]}
+																		}
+																	}
+																]
+															}
+														}
+													}
+												]
+											}
+										}
+									}
+								]
+							}
+						}
+					}
+				]
+			}`)
+		case "/v1/editorial/us/rooms/room-albums-1/contents":
+			if got := r.URL.Query().Get("limit"); got != "100" {
+				t.Fatalf("expected room-albums-1 limit=100, got %q", got)
+			}
+			if got := r.URL.Query().Get("l"); got != "zh-Hans" {
+				t.Fatalf("expected room-albums-1 language=zh-Hans, got %q", got)
+			}
+			_, _ = io.WriteString(w, `{
+				"data":[
+					{"id":"album-inline-2","type":"albums","attributes":{"name":"Inline Album 2 Duplicate","artistName":"Artist 2"}},
+					{"id":"album-room-1","type":"albums","attributes":{"name":"Room Album 1","artistName":"Artist 3","url":"https://example.com/albums/3","releaseDate":"2024-03-03"}}
+				]
+			}`)
+		case "/v1/editorial/us/rooms/room-albums-2/contents":
+			if got := r.URL.Query().Get("l"); got != "zh-Hans" {
+				t.Fatalf("expected room-albums-2 language=zh-Hans, got %q", got)
+			}
+			switch r.URL.Query().Get("offset") {
+			case "":
+				roomTwoRequests++
+				_, _ = io.WriteString(w, `{
+					"next":"contents?offset=100",
+					"data":[
+						{"id":"album-room-2a","type":"albums","attributes":{"name":"Room Album 2A","artistName":"Artist 4"}}
+					]
+				}`)
+			case "100":
+				roomTwoRequests++
+				_, _ = io.WriteString(w, `{
+					"data":[
+						{"id":"album-room-2b","type":"albums","attributes":{"name":"Room Album 2B","artistName":"Artist 5"}}
+					]
+				}`)
+			default:
+				t.Fatalf("unexpected room-albums-2 offset: %q", r.URL.Query().Get("offset"))
+			}
+		case "/v1/editorial/us/rooms/room-stations-1/contents":
+			t.Fatalf("stations room should not be fetched")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{
+		AppleToken: "token",
+		Language:   "zh-Hans",
+		HTTPClient: client,
+		UserAgent:  defaultUserAgent,
+	}
+
+	albums, err := service.FetchCuratorAlbums("us", "1702073195")
+	if err != nil {
+		t.Fatalf("FetchCuratorAlbums failed: %v", err)
+	}
+	if roomTwoRequests != 2 {
+		t.Fatalf("expected room-albums-2 to paginate twice, got %d requests", roomTwoRequests)
+	}
+	if len(albums) != 5 {
+		t.Fatalf("expected 5 unique curator albums, got %d", len(albums))
+	}
+	gotIDs := make([]string, 0, len(albums))
+	for _, album := range albums {
+		gotIDs = append(gotIDs, album.ID)
+	}
+	wantIDs := []string{"album-inline-1", "album-inline-2", "album-room-1", "album-room-2a", "album-room-2b"}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("unexpected curator album ids: got %v want %v", gotIDs, wantIDs)
+	}
+}
+
 func TestExportAlbumLyricsWritesFilesAndCountsFailures(t *testing.T) {
 	tmpDir := t.TempDir()
 	service := &Service{

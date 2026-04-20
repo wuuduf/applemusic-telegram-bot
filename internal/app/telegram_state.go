@@ -705,6 +705,10 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 		return func(session *DownloadSession) error {
 			return b.stageArtistLPAlbumsCollection(session, mediaID, storefront)
 		}, nil
+	case mediaTypeCuratorLPs:
+		return func(session *DownloadSession) error {
+			return b.stageCuratorAlbumsCollection(session, mediaID, storefront)
+		}, nil
 	case mediaTypeMusicVideo:
 		saveDir := strings.TrimSpace(Config.AlacSaveFolder)
 		if saveDir == "" {

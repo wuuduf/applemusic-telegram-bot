@@ -460,6 +460,9 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	caption := formatTelegramCaption(sizeBytes, bitrateKbps, format)
 	if hasMeta {
 		caption = formatTelegramAudioCaption(sizeBytes, bitrateKbps, format, meta)
+		if chatID == b.forwardChatID {
+			caption = appendArchiveAudioCaption(caption, meta.TrackID, format, meta.Storefront)
+		}
 	}
 	if status != nil {
 		status.Update("Uploading audio", 0, sizeBytes)
@@ -1600,6 +1603,9 @@ func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAud
 		Storefront:     strings.TrimSpace(entry.Storefront),
 		Format:         format,
 	})
+	if chatID == b.forwardChatID {
+		caption = appendArchiveAudioCaption(caption, trackID, format, entry.Storefront)
+	}
 	payload := map[string]any{
 		"chat_id": chatID,
 		"audio":   entry.FileID,

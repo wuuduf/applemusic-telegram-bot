@@ -1945,11 +1945,15 @@ type Update struct {
 }
 
 type Message struct {
-	MessageID      int      `json:"message_id"`
-	From           *User    `json:"from,omitempty"`
-	Chat           Chat     `json:"chat"`
-	Text           string   `json:"text,omitempty"`
-	ReplyToMessage *Message `json:"reply_to_message,omitempty"`
+	MessageID      int       `json:"message_id"`
+	From           *User     `json:"from,omitempty"`
+	Chat           Chat      `json:"chat"`
+	Text           string    `json:"text,omitempty"`
+	Caption        string    `json:"caption,omitempty"`
+	Audio          *Audio    `json:"audio,omitempty"`
+	Document       *Document `json:"document,omitempty"`
+	Video          *Video    `json:"video,omitempty"`
+	ReplyToMessage *Message  `json:"reply_to_message,omitempty"`
 }
 
 type CallbackQuery struct {
@@ -3310,6 +3314,9 @@ func (b *TelegramBot) getChatFormat(chatID int64) string {
 }
 
 func (b *TelegramBot) handleMessage(msg *Message) {
+	if b.maybeIngestArchiveMessage(msg) && msg.Text == "" {
+		return
+	}
 	if msg.Text == "" {
 		return
 	}

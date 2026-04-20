@@ -1928,6 +1928,82 @@ func TestSendAudioByFileIDWithoutSongCommentDoesNotArchiveForward(t *testing.T) 
 	}
 }
 
+func TestSendAudioByFileIDWithoutSongCommentAddsArchiveMetadataCaption(t *testing.T) {
+	var gotCaption string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendAudio"):
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload failed: %v", err)
+			}
+			gotCaption, _ = payload["caption"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"audio":{"file_id":"cached-file","file_size":123}}}`))
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:         "test-token",
+		apiBase:       server.URL,
+		client:        server.Client(),
+		forwardChatID: -1001234567890,
+		maxFileBytes:  1024,
+	}
+	err := bot.sendAudioByFileIDWithoutSongComment(bot.forwardChatID, CachedAudio{
+		FileID:         "cached-file",
+		FileSize:       123,
+		Format:         telegramFormatAlac,
+		BitrateKbps:    852.74,
+		DurationMillis: 1000,
+		Title:          "Blank Space",
+		Performer:      "Taylor Swift",
+		AlbumName:      "1989 (Taylor’s Version)",
+		GenreNames:     []string{"Pop"},
+		Storefront:     "us",
+	}, 0, "track-1")
+	if err != nil {
+		t.Fatalf("sendAudioByFileIDWithoutSongComment failed: %v", err)
+	}
+	if !strings.Contains(gotCaption, "#amdlcache tid=track-1 fmt=alac sf=us") {
+		t.Fatalf("expected archive caption metadata, got %q", gotCaption)
+	}
+}
+
+func TestHandleMessageIngestsArchiveAudioIntoCache(t *testing.T) {
+	bot := &TelegramBot{
+		forwardChatID: -1001234567890,
+		cache:         map[string]CachedAudio{},
+	}
+	bot.handleMessage(&Message{
+		MessageID: 77,
+		Chat:      Chat{ID: bot.forwardChatID, Type: "supergroup"},
+		Caption:   "#AppleMusic #alac 文件大小1.23MB 456.78kbps\n#amdlcache tid=track-1 fmt=alac sf=us",
+		Audio: &Audio{
+			FileID:   "archive-file-id",
+			FileSize: 123,
+		},
+	})
+
+	entry, ok := bot.getCachedAudio("track-1", 0, telegramFormatAlac)
+	if !ok {
+		t.Fatalf("expected archive audio to be cached")
+	}
+	if entry.FileID != "archive-file-id" {
+		t.Fatalf("expected cached archive file_id, got %+v", entry)
+	}
+	if entry.Storefront != "us" {
+		t.Fatalf("expected cached storefront from archive caption, got %+v", entry)
+	}
+}
+
 func TestHandleCommandWithContextAmcachepushPushesCachedAudioInOrder(t *testing.T) {
 	type sendAudioCall struct {
 		ChatID int64

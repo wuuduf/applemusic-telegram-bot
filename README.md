@@ -87,6 +87,26 @@ go run . --search song "Taylor Swift"
 
 - `/songid` `/albumid` `/playlistid` `/stationid` `/mvid` `/artistid`
 
+批量能力说明：
+
+- 一条消息中可直接发送**多个** Apple Music 链接，Bot 会按顺序逐个识别并排队下载
+- `/u` 支持一次传入多个链接
+- `/songid` `/albumid` `/playlistid` `/stationid` `/mvid` `/artistid` 支持一次传入多个 ID
+- `/id <type> <id...>` 支持同类型批量，例如 `song | album | playlist | station | mv | artist | curator`
+- 多 ID 分隔符支持：空格、英文逗号 `,`、中文逗号 `，`、英文分号 `;`、中文分号 `；`
+
+示例：
+
+```text
+/songid 123 456 789
+/albumid 111,222,333
+/id curator 1702073195
+
+https://music.apple.com/us/album/.../123
+https://music.apple.com/us/playlist/.../pl.xxxxx
+https://music.apple.com/us/curator/100-best-albums/1702073195
+```
+
 ## 关键配置项
 
 - `telegram-cache-file`

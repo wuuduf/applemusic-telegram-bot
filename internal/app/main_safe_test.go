@@ -2984,6 +2984,54 @@ func TestParseAppleMusicURLCurator(t *testing.T) {
 	}
 }
 
+func TestExtractAppleMusicURLsReturnsAllMatchesInOrder(t *testing.T) {
+	t.Parallel()
+	text := strings.Join([]string{
+		"先看这个：https://music.apple.com/us/album/foo/1234567890?i=1234567891,",
+		"再看这个 <https://music.apple.com/us/curator/100-best-albums/1702073195?l=zh-Hans-CN>",
+		"以及非 Apple 链接 https://example.com/test",
+		"最后一个 https://music.apple.com/us/playlist/foo/pl.u-123ABC-def!",
+	}, " ")
+	got := extractAppleMusicURLs(text)
+	want := []string{
+		"https://music.apple.com/us/album/foo/1234567890?i=1234567891",
+		"https://music.apple.com/us/curator/100-best-albums/1702073195?l=zh-Hans-CN",
+		"https://music.apple.com/us/playlist/foo/pl.u-123ABC-def",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("unexpected urls:\n got=%v\nwant=%v", got, want)
+	}
+	if first := extractFirstAppleMusicURL(text); first != want[0] {
+		t.Fatalf("unexpected first url: got=%q want=%q", first, want[0])
+	}
+}
+
+func TestSplitBatchArgsSupportsCommonSeparators(t *testing.T) {
+	t.Parallel()
+	got := splitBatchArgs([]string{
+		"123,456",
+		"789，101112",
+		"pl.u-123ABC-def;ra.9876abcd",
+		"1702073195；222",
+		"",
+		"  333  ",
+	})
+	want := []string{
+		"123",
+		"456",
+		"789",
+		"101112",
+		"pl.u-123ABC-def",
+		"ra.9876abcd",
+		"1702073195",
+		"222",
+		"333",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("unexpected batch args: got=%v want=%v", got, want)
+	}
+}
+
 func TestJoinFileWithinRootRejectsEscapingPaths(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

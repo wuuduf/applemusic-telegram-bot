@@ -602,11 +602,12 @@ func parseAppleMusicURL(raw string) (*AppleURLTarget, error) {
 	return nil, fmt.Errorf("unsupported Apple Music URL")
 }
 
-func extractFirstAppleMusicURL(text string) string {
+func extractAppleMusicURLs(text string) []string {
 	if strings.TrimSpace(text) == "" {
-		return ""
+		return nil
 	}
 	tokens := strings.Fields(text)
+	urls := make([]string, 0)
 	for _, token := range tokens {
 		candidate := strings.TrimSpace(token)
 		candidate = strings.Trim(candidate, "<>()[]{}\"'“”‘’")
@@ -616,13 +617,42 @@ func extractFirstAppleMusicURL(text string) string {
 		}
 		lower := strings.ToLower(candidate)
 		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			continue
+			httpIdx := strings.Index(lower, "http://")
+			httpsIdx := strings.Index(lower, "https://")
+			start := -1
+			switch {
+			case httpIdx >= 0 && httpsIdx >= 0:
+				if httpIdx < httpsIdx {
+					start = httpIdx
+				} else {
+					start = httpsIdx
+				}
+			case httpIdx >= 0:
+				start = httpIdx
+			case httpsIdx >= 0:
+				start = httpsIdx
+			}
+			if start < 0 {
+				continue
+			}
+			candidate = candidate[start:]
+			candidate = strings.Trim(candidate, "<>()[]{}\"'“”‘’")
+			candidate = strings.TrimRight(candidate, ".,!?")
+			lower = strings.ToLower(candidate)
 		}
 		if strings.Contains(lower, "music.apple.com/") || strings.Contains(lower, "beta.music.apple.com/") || strings.Contains(lower, "classical.music.apple.com/") {
-			return candidate
+			urls = append(urls, candidate)
 		}
 	}
-	return ""
+	return urls
+}
+
+func extractFirstAppleMusicURL(text string) string {
+	urls := extractAppleMusicURLs(text)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
 }
 func getUrlSong(songUrl string, token string) (string, error) {
 	storefront, songId := checkUrlSong(songUrl)
@@ -3316,16 +3346,9 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 		_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 		return
 	}
-	urlText := extractFirstAppleMusicURL(text)
-	if urlText == "" {
+	if b.handleURLTextBatch(msg.Chat.ID, msg.MessageID, text, false) == 0 {
 		return
 	}
-	target, err := parseAppleMusicURL(urlText)
-	if err != nil {
-		_ = b.sendMessageWithReply(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, fmt.Sprintf("Unsupported Apple Music URL: %s", urlText)), nil, msg.MessageID)
-		return
-	}
-	b.handleURLTarget(msg.Chat.ID, msg.MessageID, target)
 }
 
 func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
@@ -3631,13 +3654,13 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 		b.handleSearch(chatID, kind, strings.Join(args[1:], " "), replyToID)
 	case "url":
 		if len(args) == 0 {
-			_ = b.sendMessageWithReply(chatID, "Usage: /url <apple-music-url>", nil, replyToID)
+			_ = b.sendMessageWithReply(chatID, "Usage: /url <apple-music-url> [more-urls...]", nil, replyToID)
 			return
 		}
-		raw := extractFirstAppleMusicURL(strings.Join(args, " "))
-		if raw == "" {
-			raw = args[0]
+		if b.handleURLTextBatch(chatID, replyToID, strings.Join(args, " "), false) > 0 {
+			return
 		}
+		raw := args[0]
 		target, err := parseAppleMusicURL(raw)
 		if err != nil {
 			_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Unsupported Apple Music URL: %s", raw), nil, replyToID)
@@ -3645,6 +3668,10 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 		}
 		b.handleURLTarget(chatID, replyToID, target)
 	case "refresh":
+		if len(extractAppleMusicURLs(strings.Join(args, " "))) > 1 {
+			_ = b.handleURLTextBatch(chatID, replyToID, strings.Join(args, " "), true)
+			return
+		}
 		target, err := resolveRefreshURLTarget(args)
 		if err != nil {
 			_ = b.sendMessageWithReply(chatID, "Usage: /refresh <apple-music-url> OR /refresh url <apple-music-url>", nil, replyToID)
@@ -3707,6 +3734,9 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 			return
 		}
 		if len(args) == 1 {
+			if b.handleURLTextBatch(chatID, replyToID, args[0], false) > 0 {
+				return
+			}
 			if target, err := parseAppleMusicURL(args[0]); err == nil {
 				b.handleURLTarget(chatID, replyToID, target)
 				return
@@ -3715,58 +3745,62 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 			return
 		}
 		kind := strings.ToLower(args[0])
-		switch kind {
-		case "song":
-			b.queueDownloadSong(chatID, args[1])
-		case "album":
-			b.queueDownloadAlbum(chatID, args[1])
-		case "playlist":
-			b.queueDownloadPlaylist(chatID, args[1])
-		case "station":
-			b.queueDownloadStation(chatID, args[1])
-		case "mv", "music-video", "musicvideo":
-			b.queueDownloadMusicVideo(chatID, args[1])
-		case "artist":
-			b.startArtistSelection(chatID, args[1], "", Config.Storefront, replyToID)
-		default:
-			_ = b.sendMessage(chatID, "Usage: /id <song|album|playlist|station|mv|artist> <id>", nil)
+		mediaType := normalizeCommandMediaType(kind)
+		if mediaType == "" {
+			_ = b.sendMessage(chatID, "Usage: /id <song|album|playlist|station|mv|artist|curator> <id> [more-ids...]", nil)
+			return
+		}
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaType, args[1:]) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /id <song|album|playlist|station|mv|artist|curator> <id> [more-ids...]", nil)
 		}
 	case "songid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /songid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /songid <id> [more-ids...]", nil)
 			return
 		}
-		b.queueDownloadSong(chatID, args[0])
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypeSong, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /songid <id> [more-ids...]", nil)
+		}
 	case "albumid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /albumid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /albumid <id> [more-ids...]", nil)
 			return
 		}
-		b.queueDownloadAlbum(chatID, args[0])
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypeAlbum, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /albumid <id> [more-ids...]", nil)
+		}
 	case "playlistid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /playlistid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /playlistid <id> [more-ids...]", nil)
 			return
 		}
-		b.queueDownloadPlaylist(chatID, args[0])
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypePlaylist, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /playlistid <id> [more-ids...]", nil)
+		}
 	case "stationid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /stationid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /stationid <id> [more-ids...]", nil)
 			return
 		}
-		b.queueDownloadStation(chatID, args[0])
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypeStation, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /stationid <id> [more-ids...]", nil)
+		}
 	case "mvid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /mvid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /mvid <id> [more-ids...]", nil)
 			return
 		}
-		b.queueDownloadMusicVideo(chatID, args[0])
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypeMusicVideo, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /mvid <id> [more-ids...]", nil)
+		}
 	case "artistid":
 		if len(args) == 0 {
-			_ = b.sendMessage(chatID, "Usage: /artistid <id>", nil)
+			_ = b.sendMessage(chatID, "Usage: /artistid <id> [more-ids...]", nil)
 			return
 		}
-		b.startArtistSelection(chatID, args[0], "", Config.Storefront, replyToID)
+		if b.enqueueMediaIDBatch(chatID, replyToID, mediaTypeArtist, args) == 0 {
+			_ = b.sendMessage(chatID, "Usage: /artistid <id> [more-ids...]", nil)
+		}
 	case "settings":
 		if len(args) > 0 {
 			settings := b.getChatSettings(chatID)
@@ -4049,6 +4083,29 @@ func (b *TelegramBot) handleURLTarget(chatID int64, replyToID int, target *Apple
 	b.handleURLTargetWithOptions(chatID, replyToID, target, false)
 }
 
+func (b *TelegramBot) handleURLTextBatch(chatID int64, replyToID int, text string, forceRefresh bool) int {
+	urls := extractAppleMusicURLs(text)
+	if len(urls) == 0 {
+		return 0
+	}
+
+	handled := 0
+	for _, raw := range urls {
+		target, err := parseAppleMusicURL(raw)
+		if err != nil {
+			_ = b.sendMessageWithReply(chatID, b.localizeOutgoingText(chatID, fmt.Sprintf("Unsupported Apple Music URL: %s", raw)), nil, replyToID)
+			continue
+		}
+		if forceRefresh && target.MediaType == mediaTypeArtist {
+			_ = b.sendMessageWithReply(chatID, b.localizeOutgoingText(chatID, fmt.Sprintf("refresh does not support artist URLs, skipped: %s", raw)), nil, replyToID)
+			continue
+		}
+		b.handleURLTargetWithOptions(chatID, replyToID, target, forceRefresh)
+		handled++
+	}
+	return handled
+}
+
 func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, target *AppleURLTarget, forceRefresh bool) {
 	if target == nil {
 		_ = b.sendMessageWithReply(chatID, "Invalid Apple Music URL.", nil, replyToID)
@@ -4085,6 +4142,60 @@ func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, ta
 	default:
 		_ = b.sendMessageWithReply(chatID, "Unsupported Apple Music URL type.", nil, replyToID)
 	}
+}
+
+func (b *TelegramBot) enqueueMediaIDBatch(chatID int64, replyToID int, mediaType string, args []string) int {
+	mediaType = normalizeCommandMediaType(mediaType)
+	if mediaType == "" {
+		return 0
+	}
+	ids := splitBatchArgs(args)
+	if len(ids) == 0 {
+		return 0
+	}
+
+	queued := 0
+	invalid := make([]string, 0)
+	for _, rawID := range ids {
+		normalizedID, err := normalizeMediaIdentifier(mediaType, rawID)
+		if err != nil {
+			invalid = append(invalid, rawID)
+			continue
+		}
+		switch mediaType {
+		case mediaTypeSong:
+			b.queueDownloadSong(chatID, normalizedID)
+		case mediaTypeAlbum:
+			b.queueDownloadAlbum(chatID, normalizedID)
+		case mediaTypePlaylist:
+			b.queueDownloadPlaylist(chatID, normalizedID)
+		case mediaTypeStation:
+			b.queueDownloadStation(chatID, normalizedID)
+		case mediaTypeMusicVideo:
+			b.queueDownloadMusicVideo(chatID, normalizedID)
+		case mediaTypeArtist:
+			b.startArtistSelection(chatID, normalizedID, "", Config.Storefront, replyToID)
+		case mediaTypeCurator:
+			b.promptMediaTransfer(chatID, mediaTypeCuratorLPs, normalizedID, Config.Storefront, "", replyToID, false)
+		default:
+			invalid = append(invalid, rawID)
+			continue
+		}
+		queued++
+	}
+
+	if len(invalid) > 0 {
+		preview := invalid
+		if len(preview) > 5 {
+			preview = preview[:5]
+		}
+		suffix := ""
+		if len(invalid) > len(preview) {
+			suffix = fmt.Sprintf(" (+%d more)", len(invalid)-len(preview))
+		}
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Skipped invalid %s ID(s): %s%s", mediaType, strings.Join(preview, ", "), suffix), nil, replyToID)
+	}
+	return queued
 }
 
 type artworkFetchResult struct {
@@ -4126,6 +4237,30 @@ func normalizeCommandMediaType(raw string) string {
 	default:
 		return ""
 	}
+}
+
+func splitBatchArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		for _, part := range strings.FieldsFunc(arg, func(r rune) bool {
+			switch r {
+			case ',', '，', ';', '；', '\n', '\r', '\t':
+				return true
+			default:
+				return false
+			}
+		}) {
+			token := strings.TrimSpace(part)
+			if token == "" {
+				continue
+			}
+			out = append(out, token)
+		}
+	}
+	return out
 }
 
 func normalizeMediaIdentifier(mediaType, rawID string) (string, error) {
@@ -8620,12 +8755,13 @@ func botHelpText() string {
 - /s 的 <类型>：song | album | artist
 - /cv 的 type：song | album | playlist | station | mv | artist
 - /ac 的 type：song | album | playlist | station
+- /songid /albumid /playlistid /stationid /mvid /artistid 支持一次传多个 ID（空格/逗号/分号分隔）
 - /st 任务线程：worker1 | worker2 | worker3 | worker4（默认 worker1）
 - /st 语言：zh | en
 - /st 赏析：comment | comment_on | comment_off
 
 也支持直接发送 Apple Music 链接（自动识别）：
-song | album | playlist | artist | station | music-video | curator
+song | album | playlist | artist | station | music-video | curator（单条消息可放多个链接）
 `)
 }
 
@@ -8660,12 +8796,13 @@ Parameters:
 - /s <type>: song | album | artist
 - /cv type: song | album | playlist | station | mv | artist
 - /ac type: song | album | playlist | station
+- /songid /albumid /playlistid /stationid /mvid /artistid accept multiple IDs at once (space/comma/semicolon separated)
 - /st workers: worker1 | worker2 | worker3 | worker4 (default worker1)
 - /st language: zh | en
 - /st song comment: comment | comment_on | comment_off
 
 You can also send Apple Music URLs directly (auto recognized):
-song | album | playlist | artist | station | music-video | curator
+song | album | playlist | artist | station | music-video | curator (multiple links in one message are supported)
 `)
 	}
 	return botHelpText()

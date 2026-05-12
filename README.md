@@ -6,7 +6,7 @@
 示例bot https://t.me/jellyamdl_bot
 ## 项目关系（继承链）
 
-当前仓库：`wuuduf/applemusic-telegram-bot`（已在 GitHub 上挂到 fork network）
+当前仓库：`wuuduf/applemusic-telegram-bot`
 
 继承链：
 

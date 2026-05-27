@@ -12,6 +12,40 @@ import (
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 )
 
+func cloneCachedAudioMap(items map[string]CachedAudio) map[string]CachedAudio {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make(map[string]CachedAudio, len(items))
+	for key, entry := range items {
+		entry.GenreNames = append([]string(nil), entry.GenreNames...)
+		cloned[key] = entry
+	}
+	return cloned
+}
+
+func cloneCachedDocumentMap(items map[string]CachedDocument) map[string]CachedDocument {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make(map[string]CachedDocument, len(items))
+	for key, entry := range items {
+		cloned[key] = entry
+	}
+	return cloned
+}
+
+func cloneCachedVideoMap(items map[string]CachedVideo) map[string]CachedVideo {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make(map[string]CachedVideo, len(items))
+	for key, entry := range items {
+		cloned[key] = entry
+	}
+	return cloned
+}
+
 const (
 	telegramCacheDirPerm  = 0o700
 	telegramCacheFilePerm = 0o600
@@ -58,10 +92,11 @@ func (b *TelegramBot) loadCache() {
 	b.cache = make(map[string]CachedAudio)
 	b.docCache = make(map[string]CachedDocument)
 	b.videoCache = make(map[string]CachedVideo)
-	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
+	target := strings.TrimSpace(b.cacheFile)
 	if target == "" {
 		return
 	}
+	target = filepath.Clean(target)
 	if err := ensureNonSymlinkRegularFile(target); err != nil {
 		return
 	}
@@ -142,15 +177,16 @@ func (b *TelegramBot) loadCache() {
 }
 
 func (b *TelegramBot) saveCacheLocked() {
-	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
+	target := strings.TrimSpace(b.cacheFile)
 	if target == "" {
 		return
 	}
+	target = filepath.Clean(target)
 	payload := telegramCacheFile{
 		Version:   4,
-		Items:     b.cache,
-		Documents: b.docCache,
-		Videos:    b.videoCache,
+		Items:     cloneCachedAudioMap(b.cache),
+		Documents: cloneCachedDocumentMap(b.docCache),
+		Videos:    cloneCachedVideoMap(b.videoCache),
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -161,6 +197,118 @@ func (b *TelegramBot) saveCacheLocked() {
 	if err := atomicWriteTelegramCacheFile(target, data); err != nil {
 		fmt.Printf("telegram cache save failed (%s, atomic write): %v\n", target, err)
 		appendRuntimeErrorLogf("telegram cache save failed (%s, atomic write): %v", target, err)
+	}
+}
+
+func (b *TelegramBot) saveCacheNow() {
+	if b == nil {
+		return
+	}
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	b.saveCacheLocked()
+}
+
+func (b *TelegramBot) startCacheSaver() {
+	if b == nil || strings.TrimSpace(b.cacheFile) == "" {
+		return
+	}
+	if b.cacheSave != nil {
+		return
+	}
+	saveCh := make(chan struct{}, 1)
+	stopCh := make(chan struct{})
+	b.cacheSave = saveCh
+	b.cacheStop = stopCh
+	b.cacheWG.Add(1)
+	go func() {
+		defer b.cacheWG.Done()
+		runWithRecovery("telegram cache saver", nil, func() {
+			var (
+				timer  *time.Timer
+				timerC <-chan time.Time
+				dirty  bool
+			)
+			stopTimer := func() {
+				if timer == nil {
+					return
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer = nil
+				timerC = nil
+			}
+			resetTimer := func() {
+				if timer == nil {
+					timer = time.NewTimer(defaultTelegramCacheSaveDebounce)
+				} else {
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(defaultTelegramCacheSaveDebounce)
+				}
+				timerC = timer.C
+			}
+			flush := func() {
+				if !dirty {
+					return
+				}
+				b.saveCacheNow()
+				dirty = false
+			}
+			defer stopTimer()
+			for {
+				select {
+				case <-saveCh:
+					dirty = true
+					resetTimer()
+				case <-timerC:
+					flush()
+					stopTimer()
+				case <-stopCh:
+					for {
+						select {
+						case <-saveCh:
+							dirty = true
+						default:
+							flush()
+							return
+						}
+					}
+				}
+			}
+		})
+	}()
+}
+
+func (b *TelegramBot) stopCacheSaver() {
+	if b == nil || b.cacheStop == nil {
+		return
+	}
+	close(b.cacheStop)
+	b.cacheWG.Wait()
+	b.cacheStop = nil
+	b.cacheSave = nil
+}
+
+func (b *TelegramBot) requestCacheSave() {
+	if b == nil {
+		return
+	}
+	if b.cacheSave == nil {
+		b.saveCacheLocked()
+		return
+	}
+	select {
+	case b.cacheSave <- struct{}{}:
+	default:
 	}
 }
 
@@ -454,7 +602,7 @@ func (b *TelegramBot) storeCachedAudio(trackID string, entry CachedAudio) {
 	}
 	entry.UpdatedAt = now
 	b.cache[cacheKey] = entry
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func (b *TelegramBot) deleteCachedAudio(trackID, format string, compressed bool) {
@@ -467,7 +615,7 @@ func (b *TelegramBot) deleteCachedAudio(trackID, format string, compressed bool)
 		return
 	}
 	delete(b.cache, b.cacheKey(trackID, format, compressed))
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func (b *TelegramBot) storeCachedDocument(key string, entry CachedDocument) {
@@ -481,7 +629,7 @@ func (b *TelegramBot) storeCachedDocument(key string, entry CachedDocument) {
 	}
 	entry.UpdatedAt = time.Now()
 	b.docCache[key] = entry
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func (b *TelegramBot) getCachedDocument(key string) (CachedDocument, bool) {
@@ -507,7 +655,7 @@ func (b *TelegramBot) deleteCachedDocument(key string) {
 		return
 	}
 	delete(b.docCache, key)
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func (b *TelegramBot) storeCachedVideo(key string, entry CachedVideo) {
@@ -521,7 +669,7 @@ func (b *TelegramBot) storeCachedVideo(key string, entry CachedVideo) {
 	}
 	entry.UpdatedAt = time.Now()
 	b.videoCache[key] = entry
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func (b *TelegramBot) getCachedVideo(key string) (CachedVideo, bool) {
@@ -547,7 +695,7 @@ func (b *TelegramBot) deleteCachedVideo(key string) {
 		return
 	}
 	delete(b.videoCache, key)
-	b.saveCacheLocked()
+	b.requestCacheSave()
 }
 
 func deleteCacheEntriesWithPrefix[T any](items map[string]T, prefix string) int {
@@ -590,7 +738,7 @@ func (b *TelegramBot) purgeTargetCaches(target *AppleURLTarget) int {
 		removed += deleteCacheEntriesWithPrefix(b.videoCache, prefix)
 	}
 	if removed > 0 {
-		b.saveCacheLocked()
+		b.requestCacheSave()
 	}
 	return removed
 }

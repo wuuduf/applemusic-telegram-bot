@@ -3365,3 +3365,78 @@ func TestTelegramCacheLoadSkipsSymlinkFile(t *testing.T) {
 		t.Fatalf("expected cache load to skip symlink source, got cache=%d doc=%d video=%d", len(b.cache), len(b.docCache), len(b.videoCache))
 	}
 }
+
+func TestTelegramCacheSaverFlushesOnStop(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "telegram-cache.json")
+	b := &TelegramBot{
+		cacheFile:  cachePath,
+		cache:      make(map[string]CachedAudio),
+		docCache:   make(map[string]CachedDocument),
+		videoCache: make(map[string]CachedVideo),
+	}
+	b.startCacheSaver()
+	defer b.stopCacheSaver()
+
+	b.storeCachedAudio("song-1", CachedAudio{
+		FileID: "audio-file-1",
+		Format: telegramFormatAlac,
+	})
+
+	b.stopCacheSaver()
+
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("expected cache file to be flushed on stop: %v", err)
+	}
+	var payload telegramCacheFile
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal cache payload: %v", err)
+	}
+	if _, ok := payload.Items[b.cacheKey("song-1", telegramFormatAlac, false)]; !ok {
+		t.Fatalf("expected flushed cache entry for song-1, got %d entries", len(payload.Items))
+	}
+}
+
+func TestTelegramCacheSaverDebouncesWrites(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "telegram-cache.json")
+	b := &TelegramBot{
+		cacheFile:  cachePath,
+		cache:      make(map[string]CachedAudio),
+		docCache:   make(map[string]CachedDocument),
+		videoCache: make(map[string]CachedVideo),
+	}
+	b.startCacheSaver()
+	defer b.stopCacheSaver()
+
+	b.storeCachedAudio("song-1", CachedAudio{
+		FileID: "audio-file-1",
+		Format: telegramFormatAlac,
+	})
+	b.storeCachedAudio("song-2", CachedAudio{
+		FileID: "audio-file-2",
+		Format: telegramFormatAlac,
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		raw, err := os.ReadFile(cachePath)
+		if err == nil {
+			var payload telegramCacheFile
+			if err := json.Unmarshal(raw, &payload); err == nil {
+				_, ok1 := payload.Items[b.cacheKey("song-1", telegramFormatAlac, false)]
+				_, ok2 := payload.Items[b.cacheKey("song-2", telegramFormatAlac, false)]
+				if ok1 && ok2 {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected debounced cache save to persist both entries, last err=%v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}

@@ -1686,6 +1686,7 @@ const (
 	defaultTelegramMetricsInterval            = 60 * time.Second
 	defaultTelegramSubscriptionCheckInterval  = 30 * time.Minute
 	defaultTelegramResourceCheck              = 30 * time.Second
+	defaultTelegramCacheSaveDebounce          = 250 * time.Millisecond
 	defaultTelegramMinFreeDiskMB              = 512
 	defaultTelegramMinFreeTmpMB               = 256
 	defaultTelegramSendGlobalInterval         = 150 * time.Millisecond
@@ -1874,6 +1875,9 @@ type TelegramBot struct {
 	cache      map[string]CachedAudio
 	docCache   map[string]CachedDocument
 	videoCache map[string]CachedVideo
+	cacheSave  chan struct{}
+	cacheStop  chan struct{}
+	cacheWG    sync.WaitGroup
 
 	inflightMu        sync.Mutex
 	inflightDownloads map[string]struct{}
@@ -2286,6 +2290,7 @@ func runTelegramBot(appleToken string) {
 		bot.stopSubscriptionWatcher()
 		bot.stopMetricsHTTPServer()
 		bot.stopMetricsReporter()
+		bot.stopCacheSaver()
 		bot.stopStateSaver()
 		bot.clearAllAutoDeleteMessages()
 
@@ -2833,6 +2838,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.ensureBackgroundTaskControl()
 	bot.loadCache()
+	bot.startCacheSaver()
 	bot.startStateSaver()
 	bot.startDownloadWorker()
 	bot.restoreRuntimeState()

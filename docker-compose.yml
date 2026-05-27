@@ -1,5 +1,7 @@
 services:
-  # ========== wrapper: 一次性初始化（登录）==========
+  # ============================================================
+  # ===== Legacy single-account wrapper (default profile) ======
+  # ============================================================
   # 用法：
   #   docker compose --profile init run --rm wrapper-init
   #
@@ -33,6 +35,7 @@ services:
     platform: linux/arm64
     container_name: wrapper
     restart: unless-stopped
+    profiles: ["wrapper"]
     environment:
       # 常驻启动参数，通常不需要改
       args: "-H 0.0.0.0 -M 20020"
@@ -43,7 +46,61 @@ services:
     volumes:
       - "./rootfs/data:/app/rootfs/data"
 
-  # ========== Telegram Bot API 本地服务 ==========
+  # ============================================================
+  # ====== Multi-account wrapper-manager + shim profile ========
+  # ============================================================
+  # 启动多账号方案：
+  #   docker compose --profile manager up -d
+  # 切换回单账号 wrapper：
+  #   docker compose --profile wrapper up -d wrapper
+  #
+  # 多账号方案下 bot 配置完全不动，仍然指向 :10020 / :20020；
+  # 这两个端口由 wrapper-shim 提供，背后是 wrapper-manager 的 gRPC。
+  wrapper-manager:
+    image: ghcr.io/worldobservationlog/wrapper-manager:latest
+    container_name: wrapper-manager
+    restart: unless-stopped
+    profiles: ["manager"]
+    # wrapper-manager 内部需要 PID namespace 隔离 + chroot
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    command: ["-host", "0.0.0.0", "-port", "8080"]
+    ports:
+      # 仅在你需要从宿主机直接发 gRPC（比如登录账号）时暴露
+      - "8080:8080"
+    volumes:
+      - "./wrapper-manager/data:/app/data"
+
+  wrapper-shim:
+    build:
+      context: ./wrapper-shim
+      dockerfile: Dockerfile
+    image: applemusic-telegram-bot/wrapper-shim:local
+    container_name: wrapper-shim
+    restart: unless-stopped
+    profiles: ["manager"]
+    depends_on:
+      - wrapper-manager
+    command:
+      - "-manager"
+      - "wrapper-manager:8080"
+      - "-m3u8-listen"
+      - ":20020"
+      - "-decrypt-listen"
+      - ":10020"
+      - "-wait-ready"
+      - "120s"
+    # 同 wrapper 的端口语义，bot 的 config.yaml 不需要改：
+    #   decrypt-m3u8-port: "wrapper-shim:10020"
+    #   get-m3u8-port:     "wrapper-shim:20020"
+    expose:
+      - "10020"
+      - "20020"
+
+  # ============================================================
+  # ============= Telegram Bot API 本地服务 ====================
+  # ============================================================
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
@@ -62,15 +119,17 @@ services:
     volumes:
       - "./data/telegram-bot-api:/var/lib/telegram-bot-api"
 
-  # ========== 本项目 Bot ==========
+  # ============================================================
+  # ====================== 本项目 Bot ==========================
+  # ============================================================
   bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: applemusic-telegram-bot
     restart: unless-stopped
+    # depends_on 写两组都允许，profile 决定实际启用哪个。
     depends_on:
-      - wrapper
       - telegram-bot-api
     command: ["--bot"]
     environment:
@@ -88,12 +147,19 @@ services:
 
 # ================== 关键协调关系（必须改 config.yaml）==================
 # 因为 bot 运行在容器内，不能再用 127.0.0.1 指向 wrapper / telegram-bot-api。
-# 请把 /app/config.yaml（即宿主机 ./config.yaml）中的以下项改为：
 #
-# decrypt-m3u8-port: "wrapper:10020"
-# get-m3u8-port: "wrapper:20020"
-# telegram-api-url: "http://telegram-bot-api:8081"
-# telegram-cache-file: "/app/runtime/telegram-cache.json"
+# 单账号 wrapper（profile=wrapper）：
+#   decrypt-m3u8-port: "wrapper:10020"
+#   get-m3u8-port: "wrapper:20020"
+#
+# 多账号 wrapper-manager + shim（profile=manager）：
+#   decrypt-m3u8-port: "wrapper-shim:10020"
+#   get-m3u8-port: "wrapper-shim:20020"
+#
+# 公共：
+#   telegram-api-url: "http://telegram-bot-api:8081"
+#   telegram-cache-file: "/app/runtime/telegram-cache.json"
 #
 # 启动：
-#   docker compose up -d --build
+#   单账号:   docker compose --profile wrapper up -d --build
+#   多账号:   docker compose --profile manager up -d --build

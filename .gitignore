@@ -51,3 +51,11 @@
 discord-bot/node_modules/
 discord-bot/dist/
 discord-bot/.env
+
+# wrapper-shim: standalone TCP <-> gRPC adapter for wrapper-manager migration
+!wrapper-shim/
+!wrapper-shim/**
+wrapper-shim/wrapper-shim
+wrapper-shim/wrapper-shim-bin
+wrapper-shim/dist/
+wrapper-shim/out/

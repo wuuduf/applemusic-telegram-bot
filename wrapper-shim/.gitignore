@@ -1,0 +1,12 @@
+# Build artifacts
+/wrapper-shim
+/wrapper-shim-bin
+/dist/
+/out/
+
+# Local module cache leftovers
+go.sum.bak
+
+# IDEs
+.idea/
+.vscode/

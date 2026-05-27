@@ -16,6 +16,7 @@ type runtimeMetrics struct {
 	externalCmdTimeouts   atomic.Uint64
 	cleanupDeletedFiles   atomic.Uint64
 	cleanupDeletedBytes   atomic.Int64
+	queueFullDrops        atomic.Uint64
 
 	taskMu     sync.Mutex
 	taskTotals map[string]taskTypeLifecycleTotals
@@ -28,6 +29,7 @@ type runtimeMetricsSnapshot struct {
 	ExternalCmdTimeouts uint64
 	CleanupDeletedFiles uint64
 	CleanupDeletedBytes int64
+	QueueFullDrops      uint64
 	TaskTypes           map[string]taskTypeLifecycleTotals
 }
 
@@ -89,6 +91,13 @@ func (m *runtimeMetrics) recordCleanupRemoval(size int64) {
 	if size > 0 {
 		m.cleanupDeletedBytes.Add(size)
 	}
+}
+
+func (m *runtimeMetrics) recordQueueFullDrop() {
+	if m == nil {
+		return
+	}
+	m.queueFullDrops.Add(1)
 }
 
 func (m *runtimeMetrics) recordTaskQueued(taskType string) {
@@ -162,6 +171,7 @@ func (m *runtimeMetrics) snapshot() runtimeMetricsSnapshot {
 		ExternalCmdTimeouts: m.externalCmdTimeouts.Load(),
 		CleanupDeletedFiles: m.cleanupDeletedFiles.Load(),
 		CleanupDeletedBytes: m.cleanupDeletedBytes.Load(),
+		QueueFullDrops:      m.queueFullDrops.Load(),
 	}
 	m.taskMu.Lock()
 	if len(m.taskTotals) > 0 {
@@ -391,7 +401,7 @@ func (b *TelegramBot) reportMetricsOnce() {
 	}
 	taskState := formatTaskTypeMetrics(metrics.TaskTypes, taskCurrent)
 	fmt.Printf(
-		"[metrics] queue=%d active=%d/%d inflight=%d tracked=%d uploads_ok=%d uploads_fail=%d upload_fail_rate=%.1f%% retry_after=%d cmd_timeout=%d cleanup_deleted=%d cleanup_bytes=%s%s%s\n",
+		"[metrics] queue=%d active=%d/%d inflight=%d tracked=%d uploads_ok=%d uploads_fail=%d upload_fail_rate=%.1f%% retry_after=%d cmd_timeout=%d cleanup_deleted=%d cleanup_bytes=%s queue_full_drop=%d%s%s\n",
 		queueLen,
 		active,
 		limit,
@@ -404,6 +414,7 @@ func (b *TelegramBot) reportMetricsOnce() {
 		metrics.ExternalCmdTimeouts,
 		metrics.CleanupDeletedFiles,
 		formatBytes(metrics.CleanupDeletedBytes),
+		metrics.QueueFullDrops,
 		taskState,
 		resourceState,
 	)

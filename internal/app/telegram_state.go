@@ -47,6 +47,8 @@ type telegramPersistedState struct {
 	PendingTransfers     map[int64]map[int]PendingTransfer   `json:"pending_transfers,omitempty"`
 	PendingMVStreams     map[int64]map[int]PendingMVStream   `json:"pending_mv_streams,omitempty"`
 	PendingArtistModes   map[int64]map[int]PendingArtistMode `json:"pending_artist_modes,omitempty"`
+	Subscriptions        map[string]telegramSubscription     `json:"subscriptions,omitempty"`
+	TemporaryReleases    map[string]telegramTemporaryRelease `json:"temporary_releases,omitempty"`
 	Requests             []telegramPersistedRequest          `json:"requests,omitempty"`
 	InflightKeys         []string                            `json:"inflight_keys,omitempty"`
 	AutoDelete           []telegramPersistedAutoDelete       `json:"auto_delete,omitempty"`
@@ -92,8 +94,8 @@ func (b *TelegramBot) startStateSaver() {
 				case <-saveCh:
 					runWithRecovery("telegram saveRuntimeStateNow", nil, func() {
 						if err := b.saveRuntimeStateNow(); err != nil {
-							fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
-							appendRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
+							b.logTelegramPrintf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+							b.appendTelegramRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 						}
 					})
 				case <-stopCh:
@@ -109,8 +111,8 @@ func (b *TelegramBot) stopStateSaver() {
 		return
 	}
 	if err := b.saveRuntimeStateNow(); err != nil {
-		fmt.Printf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
-		appendRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
+		b.logTelegramPrintf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
+		b.appendTelegramRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 	}
 	stopCh := b.stateStop
 	close(stopCh)
@@ -250,6 +252,8 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 		PendingTransfers:   make(map[int64]map[int]PendingTransfer),
 		PendingMVStreams:   make(map[int64]map[int]PendingMVStream),
 		PendingArtistModes: make(map[int64]map[int]PendingArtistMode),
+		Subscriptions:      make(map[string]telegramSubscription),
+		TemporaryReleases:  make(map[string]telegramTemporaryRelease),
 		Requests:           []telegramPersistedRequest{},
 		InflightKeys:       []string{},
 		AutoDelete:         []telegramPersistedAutoDelete{},
@@ -333,6 +337,13 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	}
 	b.artistModeMu.Unlock()
 
+	for id, item := range b.snapshotSubscriptions() {
+		state.Subscriptions[id] = item
+	}
+	for id, item := range b.snapshotTemporaryReleases() {
+		state.TemporaryReleases[id] = item
+	}
+
 	b.requestStateMu.Lock()
 	inflightKeys := make(map[string]struct{})
 	for _, request := range b.activeRequests {
@@ -396,6 +407,12 @@ func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
 	if len(state.PendingArtistModes) == 0 {
 		state.PendingArtistModes = nil
 	}
+	if len(state.Subscriptions) == 0 {
+		state.Subscriptions = nil
+	}
+	if len(state.TemporaryReleases) == 0 {
+		state.TemporaryReleases = nil
+	}
 	if len(state.Requests) == 0 {
 		state.Requests = nil
 	}
@@ -427,8 +444,8 @@ func (b *TelegramBot) restoreRuntimeState() {
 	state, err := loadRuntimeStateFromFile(b.stateFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			fmt.Printf("telegram runtime state load failed: %v\n", err)
-			appendRuntimeErrorLogf("telegram runtime state load failed: %v", err)
+			b.logTelegramPrintf("telegram runtime state load failed: %v\n", err)
+			b.appendTelegramRuntimeErrorLogf("telegram runtime state load failed: %v", err)
 		}
 		return
 	}
@@ -502,6 +519,8 @@ func (b *TelegramBot) restoreRuntimeState() {
 		}
 	}
 	b.artistModeMu.Unlock()
+
+	b.restoreSubscriptions(state.Subscriptions, state.TemporaryReleases)
 
 	b.clearAllAutoDeleteMessages()
 	recoveredAutoDelete := 0

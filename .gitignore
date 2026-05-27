@@ -43,3 +43,11 @@
 
 !cmd/
 !cmd/**
+# Discord bot prototype
+!docs/
+!docs/**
+!discord-bot/
+!discord-bot/**
+discord-bot/node_modules/
+discord-bot/dist/
+discord-bot/.env

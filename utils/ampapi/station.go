@@ -2,13 +2,10 @@ package ampapi
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 
-	nethttp "github.com/wuuduf/applemusic-telegram-bot/utils/nethttp"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
 )
 
@@ -17,36 +14,20 @@ func GetStationResp(storefront string, id string, language string, token string)
 }
 
 func GetStationRespWithContext(ctx context.Context, storefront string, id string, language string, token string) (*StationResp, error) {
-	var err error
-	if token == "" {
-		token, err = GetToken()
+	obj := new(StationResp)
+	err := doJSONWithRetry(ctx, token, obj, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL(fmt.Sprintf("/v1/catalog/%s/stations/%s", storefront, id)), nil)
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/stations/%s", storefront, id), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := url.Values{}
-	query.Set("omit[resource]", "autos")
-	query.Set("extend", "editorialVideo")
-	query.Set("l", language)
-	req.URL.RawQuery = query.Encode()
-	do, err := nethttp.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return nil, errors.New(do.Status)
-	}
-	obj := new(StationResp)
-	err = json.NewDecoder(do.Body).Decode(&obj)
+		setAppleMusicHeaders(req, token, "")
+		query := url.Values{}
+		query.Set("omit[resource]", "autos")
+		query.Set("extend", "editorialVideo")
+		query.Set("l", language)
+		req.URL.RawQuery = query.Encode()
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -58,39 +39,20 @@ func GetStationAssetsUrlAndServerUrl(id string, mutoken string, token string) (s
 }
 
 func GetStationAssetsUrlAndServerUrlWithContext(ctx context.Context, id string, mutoken string, token string) (string, string, error) {
-	var err error
-	if token == "" {
-		token, err = GetToken()
-		if err != nil {
-			return "", "", err
-		}
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://amp-api.music.apple.com/v1/play/assets", nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	req.Header.Set("Media-User-Token", mutoken)
-	query := url.Values{}
-	//query.Set("omit[resource]", "autos")
-	//query.Set("extend", "editorialVideo")
-	query.Set("id", id)
-	query.Set("kind", "radioStation")
-	query.Set("keyFormat", "web")
-	req.URL.RawQuery = query.Encode()
-	do, err := nethttp.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return "", "", errors.New(do.Status)
-	}
 	obj := new(StationAssets)
-	err = json.NewDecoder(do.Body).Decode(&obj)
+	err := doJSONWithRetry(ctx, token, obj, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL("/v1/play/assets"), nil)
+		if err != nil {
+			return nil, err
+		}
+		setAppleMusicHeaders(req, token, mutoken)
+		query := url.Values{}
+		query.Set("id", id)
+		query.Set("kind", "radioStation")
+		query.Set("keyFormat", "web")
+		req.URL.RawQuery = query.Encode()
+		return req, nil
+	})
 	if err != nil {
 		return "", "", err
 	}
@@ -106,40 +68,22 @@ func GetStationNextTracks(id, mutoken, language, token string) (*TrackResp, erro
 }
 
 func GetStationNextTracksWithContext(ctx context.Context, id, mutoken, language, token string) (*TrackResp, error) {
-	var err error
-	if token == "" {
-		token, err = GetToken()
+	obj := new(TrackResp)
+	err := doJSONWithRetry(ctx, token, obj, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL(fmt.Sprintf("/v1/me/stations/next-tracks/%s", id)), nil)
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://amp-api.music.apple.com/v1/me/stations/next-tracks/%s", id), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	req.Header.Set("Media-User-Token", mutoken)
-	query := url.Values{}
-	query.Set("omit[resource]", "autos")
-	//query.Set("include", "tracks,artists,record-labels")
-	query.Set("include[songs]", "artists,albums")
-	query.Set("limit", "10")
-	query.Set("extend", "editorialVideo,extendedAssetUrls")
-	query.Set("l", language)
-	req.URL.RawQuery = query.Encode()
-	do, err := nethttp.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return nil, errors.New(do.Status)
-	}
-	obj := new(TrackResp)
-	err = json.NewDecoder(do.Body).Decode(&obj)
+		setAppleMusicHeaders(req, token, mutoken)
+		query := url.Values{}
+		query.Set("omit[resource]", "autos")
+		query.Set("include[songs]", "artists,albums")
+		query.Set("limit", "10")
+		query.Set("extend", "editorialVideo,extendedAssetUrls")
+		query.Set("l", language)
+		req.URL.RawQuery = query.Encode()
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}

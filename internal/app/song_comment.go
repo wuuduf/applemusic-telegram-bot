@@ -102,18 +102,19 @@ func (b *TelegramBot) maybeSendSongCommentAfterAudio(chatID int64, replyToID int
 	if strings.TrimSpace(meta.Title) == "" && strings.TrimSpace(meta.Performer) == "" && strings.TrimSpace(meta.TrackID) == "" {
 		return
 	}
-	go func() {
-		runWithRecovery("telegram song comment", nil, func() {
-			comment, err := b.buildSongCommentForTrack(chatID, meta)
-			if err != nil || strings.TrimSpace(comment) == "" {
-				return
-			}
-			if err := b.waitTelegramSend(b.operationContext(), chatID); err != nil {
-				return
-			}
-			_ = b.sendMessageWithReply(chatID, comment, nil, replyToID)
-		})
-	}()
+	_ = b.launchBackgroundTask("telegram song comment", func(ctx context.Context) {
+		if ctx.Err() != nil {
+			return
+		}
+		comment, err := b.buildSongCommentForTrack(chatID, meta)
+		if err != nil || strings.TrimSpace(comment) == "" {
+			return
+		}
+		if err := b.waitTelegramSend(ctx, chatID); err != nil {
+			return
+		}
+		_ = b.sendMessageWithReply(chatID, comment, nil, replyToID)
+	})
 }
 
 func (b *TelegramBot) buildSongCommentForTrack(chatID int64, meta AudioMeta) (string, error) {

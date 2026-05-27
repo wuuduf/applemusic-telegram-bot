@@ -688,7 +688,7 @@ func ExtMvDataWithContext(ctx context.Context, keyAndUrls string, savePath strin
 
 	success, failed := stats.snapshotFailed()
 	if success != len(urls) {
-		return fmt.Errorf(buildSegmentDownloadErrorSummary(len(urls), success, failed))
+		return errors.New(buildSegmentDownloadErrorSummary(len(urls), success, failed))
 	}
 
 	// 显式关闭文件（defer会再次调用，但重复关闭是安全的）

@@ -486,6 +486,17 @@ func TestRuntimeMetricsTaskTypeLifecycle(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsQueueFullDrop(t *testing.T) {
+	metrics := &runtimeMetrics{}
+	metrics.recordQueueFullDrop()
+	metrics.recordQueueFullDrop()
+
+	snapshot := metrics.snapshot()
+	if snapshot.QueueFullDrops != 2 {
+		t.Fatalf("expected queue full drops=2, got %d", snapshot.QueueFullDrops)
+	}
+}
+
 func TestTrackedRequestStatsByType(t *testing.T) {
 	b := &TelegramBot{
 		activeRequests: map[string]telegramPersistedRequest{
@@ -505,6 +516,533 @@ func TestTrackedRequestStatsByType(t *testing.T) {
 	}
 	if got := stats[telegramTaskSongLyrics].QueuedCurrent; got != 1 {
 		t.Fatalf("expected song-lyrics queued current=1, got %d", got)
+	}
+}
+
+func TestServeMetricsHTTP(t *testing.T) {
+	oldMetrics := appRuntimeMetrics
+	appRuntimeMetrics = &runtimeMetrics{}
+	defer func() {
+		appRuntimeMetrics = oldMetrics
+	}()
+
+	appRuntimeMetrics.recordUploadSuccess()
+	appRuntimeMetrics.recordUploadFailure()
+	appRuntimeMetrics.recordTelegramRetryAfter()
+	appRuntimeMetrics.recordExternalCommandTimeout()
+	appRuntimeMetrics.recordCleanupRemoval(2048)
+	appRuntimeMetrics.recordQueueFullDrop()
+	appRuntimeMetrics.recordTaskQueued(telegramTaskCover)
+	appRuntimeMetrics.recordTaskStarted(telegramTaskCover)
+	appRuntimeMetrics.recordTaskFinished(telegramTaskCover)
+
+	b := &TelegramBot{
+		downloadQueue: make(chan *downloadRequest, 4),
+		workerLimit:   2,
+		activeWorkers: 1,
+		inflightDownloads: map[string]struct{}{
+			"inflight-1": {},
+		},
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-cover-queued":  {TaskType: telegramTaskCover, State: "queued"},
+			"req-cover-running": {TaskType: telegramTaskCover, State: "running"},
+		},
+		shutdownCtx: context.Background(),
+	}
+	b.downloadQueue <- &downloadRequest{requestID: "queued-1"}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	b.serveMetricsHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"amdl_telegram_queue_current 1",
+		"amdl_telegram_workers_active 1",
+		"amdl_telegram_workers_limit 2",
+		"amdl_telegram_upload_success_total 1",
+		"amdl_telegram_upload_failure_total 1",
+		"amdl_telegram_queue_full_drop_total 1",
+		`amdl_telegram_task_queued_current{task_type="cover"} 1`,
+		`amdl_telegram_task_running_current{task_type="cover"} 1`,
+		`amdl_telegram_task_enqueued_total{task_type="cover"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected metrics body to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestServeHealthzHTTPBlocked(t *testing.T) {
+	guard := &telegramResourceGuard{}
+	guard.set(true, "low disk space")
+	b := &TelegramBot{
+		resourceGuard: guard,
+		shutdownCtx:   context.Background(),
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	b.serveHealthzHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", recorder.Code)
+	}
+
+	var response telegramHealthResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode health response: %v", err)
+	}
+	if response.OK {
+		t.Fatalf("expected health response to be unhealthy")
+	}
+	if !response.ResourceBlocked || response.ResourceReason != "low disk space" {
+		t.Fatalf("unexpected health response: %+v", response)
+	}
+}
+
+func TestStartMetricsHTTPServer(t *testing.T) {
+	oldConfig := Config
+	oldMetrics := appRuntimeMetrics
+	Config.TelegramMetricsListenAddr = "127.0.0.1:0"
+	appRuntimeMetrics = &runtimeMetrics{}
+	defer func() {
+		Config = oldConfig
+		appRuntimeMetrics = oldMetrics
+	}()
+
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 1),
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+		shutdownCtx:       context.Background(),
+	}
+
+	b.startMetricsHTTPServer()
+	defer b.stopMetricsHTTPServer()
+
+	if strings.TrimSpace(b.metricsHTTPAddr) == "" {
+		t.Fatalf("expected metrics HTTP server address")
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get("http://" + b.metricsHTTPAddr + "/healthz")
+	if err != nil {
+		t.Fatalf("failed to call metrics health endpoint: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected health status 200, got %d", response.StatusCode)
+	}
+}
+
+func TestSubscriptionSnapshotRestoreRoundTrip(t *testing.T) {
+	now := time.Now()
+	source := &TelegramBot{
+		subscriptions: map[string]telegramSubscription{
+			"sub-1": {
+				ID:             "sub-1",
+				Kind:           telegramSubscriptionKindArtist,
+				TargetID:       "artist-1",
+				Storefront:     "us",
+				Title:          "Artist 1",
+				CreatedBy:      1001,
+				DeliveryChatID: 2001,
+				CreatedAt:      now,
+				LastCheckAt:    now,
+				LastSeenAlbum:  "album-1",
+				Enabled:        false,
+			},
+		},
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:                "tmp-1",
+				SubscriptionID:    "sub-1",
+				AlbumID:           "album-1",
+				Storefront:        "us",
+				Title:             "Album 1",
+				ArtistName:        "Artist 1",
+				DeliveryChatID:    2001,
+				ArchiveChatID:     -10001,
+				DiscoveredAt:      now,
+				TemporarySentAt:   now,
+				RefreshEligibleAt: now.Add(defaultTelegramTemporaryReleaseWindow),
+			},
+		},
+	}
+
+	target := &TelegramBot{}
+	target.restoreSubscriptions(source.snapshotSubscriptions(), source.snapshotTemporaryReleases())
+
+	items := target.listSubscriptions()
+	if len(items) != 1 || items[0].ID != "sub-1" || items[0].LastSeenAlbum != "album-1" || items[0].Enabled {
+		t.Fatalf("unexpected restored subscriptions: %+v", items)
+	}
+	if got := target.temporaryReleases["tmp-1"].AlbumID; got != "album-1" {
+		t.Fatalf("unexpected restored temporary release album id: %s", got)
+	}
+}
+
+func TestMarkTemporaryReleaseSentSetsWindow(t *testing.T) {
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:             "tmp-1",
+				SubscriptionID: "sub-1",
+				AlbumID:        "album-1",
+			},
+		},
+	}
+
+	b.markTemporaryReleaseSent("tmp-1")
+	release := b.temporaryReleases["tmp-1"]
+	if release.TemporarySentAt.IsZero() {
+		t.Fatalf("expected temporary sent time to be set")
+	}
+	if release.RefreshEligibleAt.Sub(release.TemporarySentAt) != defaultTelegramTemporaryReleaseWindow {
+		t.Fatalf("unexpected refresh eligible window: %s", release.RefreshEligibleAt.Sub(release.TemporarySentAt))
+	}
+}
+
+func TestFormatSubscriptionListText(t *testing.T) {
+	b := &TelegramBot{
+		subscriptions: map[string]telegramSubscription{
+			"sub-1": {
+				ID:             "sub-1",
+				Kind:           telegramSubscriptionKindArtist,
+				TargetID:       "artist-1",
+				Storefront:     "us",
+				Title:          "Artist 1",
+				DeliveryChatID: 12345,
+				CreatedAt:      time.Unix(100, 0),
+				LastCheckAt:    time.Now().Add(-2 * time.Hour),
+				LastSeenAlbum:  "album-1",
+				Enabled:        true,
+			},
+		},
+	}
+
+	text := b.formatSubscriptionListText(subscriptionListFilterAll)
+	for _, want := range []string{"当前订阅：", "summary: total=1 enabled=1 paused=0 matched=1", "sub-1", "Artist 1", "artist-1", "album-1", "state=enabled", "checked="} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected subscription list to contain %q, got %s", want, text)
+		}
+	}
+}
+
+func TestTemporaryReleaseRefreshState(t *testing.T) {
+	now := time.Now()
+	if got := temporaryReleaseRefreshState(telegramTemporaryRelease{}, now); got != "temporary-pending" {
+		t.Fatalf("expected temporary-pending, got %s", got)
+	}
+	if got := temporaryReleaseRefreshState(telegramTemporaryRelease{
+		TemporarySentAt:   now.Add(-time.Hour),
+		RefreshEligibleAt: now.Add(time.Hour),
+	}, now); got != "waiting-window" {
+		t.Fatalf("expected waiting-window, got %s", got)
+	}
+	if got := temporaryReleaseRefreshState(telegramTemporaryRelease{
+		TemporarySentAt:   now.Add(-2 * time.Hour),
+		RefreshEligibleAt: now.Add(-time.Minute),
+	}, now); got != "refresh-ready" {
+		t.Fatalf("expected refresh-ready, got %s", got)
+	}
+	if got := temporaryReleaseRefreshState(telegramTemporaryRelease{
+		Refreshed: true,
+	}, now); got != "refreshed" {
+		t.Fatalf("expected refreshed, got %s", got)
+	}
+}
+
+func TestMarkTemporaryReleaseRefreshed(t *testing.T) {
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:             "tmp-1",
+				SubscriptionID: "sub-1",
+				AlbumID:        "album-1",
+			},
+		},
+	}
+
+	b.markTemporaryReleaseRefreshed("tmp-1")
+	release := b.temporaryReleases["tmp-1"]
+	if !release.Refreshed {
+		t.Fatalf("expected release to be marked refreshed")
+	}
+	if release.RefreshedAt.IsZero() {
+		t.Fatalf("expected refreshed at to be set")
+	}
+}
+
+func TestFormatTemporaryReleaseListText(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:                "tmp-1",
+				SubscriptionID:    "sub-1",
+				AlbumID:           "album-1",
+				Title:             "Album 1",
+				DiscoveredAt:      now,
+				TemporarySentAt:   now,
+				RefreshEligibleAt: now.Add(defaultTelegramTemporaryReleaseWindow),
+			},
+		},
+	}
+
+	text := b.formatTemporaryReleaseListText(temporaryReleaseFilterAll, "", "")
+	for _, want := range []string{"临时订阅发布记录", "summary: total=1 pending=1 ready=0 refreshed=0 matched=1", "tmp-1", "Album 1", "album-1", "waiting-window", "remaining="} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected temporary release list to contain %q, got %s", want, text)
+		}
+	}
+}
+
+func TestTemporaryReleaseMatchesFilter(t *testing.T) {
+	cases := []struct {
+		status string
+		filter temporaryReleaseFilter
+		want   bool
+	}{
+		{status: "temporary-pending", filter: temporaryReleaseFilterPending, want: true},
+		{status: "waiting-window", filter: temporaryReleaseFilterPending, want: true},
+		{status: "refresh-ready", filter: temporaryReleaseFilterReady, want: true},
+		{status: "refreshed", filter: temporaryReleaseFilterRefreshed, want: true},
+		{status: "refreshed", filter: temporaryReleaseFilterReady, want: false},
+	}
+	for _, tc := range cases {
+		if got := temporaryReleaseMatchesFilter(tc.status, tc.filter); got != tc.want {
+			t.Fatalf("status=%s filter=%s want=%t got=%t", tc.status, tc.filter, tc.want, got)
+		}
+	}
+}
+
+func TestSetSubscriptionEnabled(t *testing.T) {
+	b := &TelegramBot{
+		subscriptions: map[string]telegramSubscription{
+			"sub-1": {
+				ID:      "sub-1",
+				Enabled: true,
+			},
+		},
+	}
+	item, changed, ok := b.setSubscriptionEnabled("sub-1", false)
+	if !ok || !changed || item.Enabled {
+		t.Fatalf("expected subscription to be paused: ok=%t changed=%t item=%+v", ok, changed, item)
+	}
+	if b.subscriptions["sub-1"].Enabled {
+		t.Fatalf("expected subscription enabled=false after pause")
+	}
+}
+
+func TestShouldDeliverTemporaryReleaseToArchiveDedupesByEarliest(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:            "tmp-1",
+				AlbumID:       "album-1",
+				Storefront:    "us",
+				ArchiveChatID: -1001,
+				DiscoveredAt:  now.Add(-time.Minute),
+			},
+			"tmp-2": {
+				ID:            "tmp-2",
+				AlbumID:       "album-1",
+				Storefront:    "us",
+				ArchiveChatID: -1001,
+				DiscoveredAt:  now,
+			},
+		},
+	}
+	if !b.shouldDeliverTemporaryReleaseToArchive(b.temporaryReleases["tmp-1"]) {
+		t.Fatalf("expected earliest release to be canonical for archive delivery")
+	}
+	if b.shouldDeliverTemporaryReleaseToArchive(b.temporaryReleases["tmp-2"]) {
+		t.Fatalf("expected later duplicate release to be skipped for archive delivery")
+	}
+}
+
+func TestFormatTemporaryReleaseListTextFilterPending(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-pending": {
+				ID:                "tmp-pending",
+				AlbumID:           "album-pending",
+				DiscoveredAt:      now,
+				TemporarySentAt:   now,
+				RefreshEligibleAt: now.Add(time.Hour),
+			},
+			"tmp-ready": {
+				ID:                "tmp-ready",
+				AlbumID:           "album-ready",
+				DiscoveredAt:      now.Add(time.Minute),
+				TemporarySentAt:   now.Add(-2 * time.Hour),
+				RefreshEligibleAt: now.Add(-time.Minute),
+			},
+		},
+	}
+	text := b.formatTemporaryReleaseListText(temporaryReleaseFilterPending, "", "")
+	if !strings.Contains(text, "tmp-pending") {
+		t.Fatalf("expected pending list to contain tmp-pending, got %s", text)
+	}
+	if strings.Contains(text, "tmp-ready") {
+		t.Fatalf("expected pending list to exclude tmp-ready, got %s", text)
+	}
+}
+
+func TestFormatTemporaryReleaseListTextFilterReady(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-ready": {
+				ID:                "tmp-ready",
+				AlbumID:           "album-ready",
+				Title:             "Album Ready",
+				ArtistName:        "Artist Ready",
+				DiscoveredAt:      now,
+				TemporarySentAt:   now.Add(-3 * time.Hour),
+				RefreshEligibleAt: now.Add(-2 * time.Hour),
+			},
+		},
+	}
+	text := b.formatTemporaryReleaseListText(temporaryReleaseFilterReady, "", "")
+	for _, want := range []string{"summary: total=1 pending=0 ready=1 refreshed=0 matched=1", "tmp-ready", "ready_for=", "artist=Artist Ready"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected ready list to contain %q, got %s", want, text)
+		}
+	}
+}
+
+func TestFormatSubscriptionRemaining(t *testing.T) {
+	if got := formatSubscriptionRemaining(26*time.Hour + 30*time.Minute); got != "1d2h" {
+		t.Fatalf("unexpected remaining format: %s", got)
+	}
+	if got := formatSubscriptionRemaining(95 * time.Minute); got != "1h35m" {
+		t.Fatalf("unexpected remaining format: %s", got)
+	}
+	if got := formatSubscriptionRemaining(20 * time.Minute); got != "20m" {
+		t.Fatalf("unexpected remaining format: %s", got)
+	}
+}
+
+func TestNormalizeSubscriptionListFilter(t *testing.T) {
+	if got, ok := normalizeSubscriptionListFilter("enabled"); !ok || got != subscriptionListFilterEnabled {
+		t.Fatalf("expected enabled filter, got %q ok=%t", got, ok)
+	}
+	if got, ok := normalizeSubscriptionListFilter("paused"); !ok || got != subscriptionListFilterPaused {
+		t.Fatalf("expected paused filter, got %q ok=%t", got, ok)
+	}
+	if _, ok := normalizeSubscriptionListFilter("weird"); ok {
+		t.Fatalf("expected invalid filter to fail")
+	}
+}
+
+func TestParseTemporaryReleaseListArgs(t *testing.T) {
+	filter, kind, value, ok := parseTemporaryReleaseListArgs([]string{"artist", "Taylor"})
+	if !ok || filter != temporaryReleaseFilterAll || kind != "artist" || value != "Taylor" {
+		t.Fatalf("unexpected artist parse result: filter=%q kind=%q value=%q ok=%t", filter, kind, value, ok)
+	}
+	filter, kind, value, ok = parseTemporaryReleaseListArgs([]string{"album", "album-1"})
+	if !ok || kind != "album" || value != "album-1" {
+		t.Fatalf("unexpected album parse result: filter=%q kind=%q value=%q ok=%t", filter, kind, value, ok)
+	}
+	if _, _, _, ok = parseTemporaryReleaseListArgs([]string{"artist"}); ok {
+		t.Fatalf("expected missing artist query to fail")
+	}
+}
+
+func TestFormatSubscriptionListTextFilterPaused(t *testing.T) {
+	b := &TelegramBot{
+		subscriptions: map[string]telegramSubscription{
+			"sub-on":  {ID: "sub-on", Title: "On", Enabled: true, CreatedAt: time.Unix(1, 0)},
+			"sub-off": {ID: "sub-off", Title: "Off", Enabled: false, CreatedAt: time.Unix(2, 0)},
+		},
+	}
+	text := b.formatSubscriptionListText(subscriptionListFilterPaused)
+	for _, want := range []string{"summary: total=2 enabled=1 paused=1 matched=1", "sub-off"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected paused list to contain %q, got %s", want, text)
+		}
+	}
+	if strings.Contains(text, "sub-on") {
+		t.Fatalf("expected paused list to exclude sub-on, got %s", text)
+	}
+}
+
+func TestFormatTemporaryReleaseListTextArtistFilter(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {ID: "tmp-1", Title: "Album A", ArtistName: "Artist A", AlbumID: "album-a", DiscoveredAt: now},
+			"tmp-2": {ID: "tmp-2", Title: "Album B", ArtistName: "Artist B", AlbumID: "album-b", DiscoveredAt: now.Add(time.Minute)},
+		},
+	}
+	text := b.formatTemporaryReleaseListText(temporaryReleaseFilterAll, "artist", "artist a")
+	for _, want := range []string{"matched=1", "tmp-1", "match_artist=artist a"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected artist filtered list to contain %q, got %s", want, text)
+		}
+	}
+	if strings.Contains(text, "tmp-2") {
+		t.Fatalf("expected artist filtered list to exclude tmp-2, got %s", text)
+	}
+}
+
+func TestFormatTemporaryReleaseListTextAlbumFilter(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {ID: "tmp-1", Title: "Album A", ArtistName: "Artist A", AlbumID: "album-a", DiscoveredAt: now},
+			"tmp-2": {ID: "tmp-2", Title: "Album B", ArtistName: "Artist B", AlbumID: "album-b", DiscoveredAt: now.Add(time.Minute)},
+		},
+	}
+	text := b.formatTemporaryReleaseListText(temporaryReleaseFilterAll, "album", "album-b")
+	for _, want := range []string{"matched=1", "tmp-2", "match_album=album-b"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected album filtered list to contain %q, got %s", want, text)
+		}
+	}
+	if strings.Contains(text, "tmp-1") {
+		t.Fatalf("expected album filtered list to exclude tmp-1, got %s", text)
+	}
+}
+
+func TestTriggerTemporaryReleaseRefreshRejectsNotEligible(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		subscriptions: map[string]telegramSubscription{
+			"sub-1": {
+				ID:             "sub-1",
+				Kind:           telegramSubscriptionKindArtist,
+				TargetID:       "artist-1",
+				Storefront:     "us",
+				Title:          "Artist 1",
+				DeliveryChatID: 123,
+				Enabled:        true,
+			},
+		},
+		temporaryReleases: map[string]telegramTemporaryRelease{
+			"tmp-1": {
+				ID:                "tmp-1",
+				SubscriptionID:    "sub-1",
+				AlbumID:           "album-1",
+				Storefront:        "us",
+				TemporarySentAt:   now.Add(-time.Hour),
+				RefreshEligibleAt: now.Add(time.Hour),
+			},
+		},
+	}
+
+	_, err := b.triggerTemporaryReleaseRefresh(b.temporaryReleases["tmp-1"])
+	if err == nil || !strings.Contains(err.Error(), "not eligible") {
+		t.Fatalf("expected not eligible error, got %v", err)
 	}
 }
 
@@ -619,7 +1157,7 @@ func TestTaskWorkerContinuesAfterHeavyTaskPanic(t *testing.T) {
 		taskType:  telegramTaskCover,
 		mediaType: mediaTypeAlbum,
 		mediaID:   "album-panic",
-		run: func(*TelegramBot) error {
+		run: func(*TelegramBot, context.Context) error {
 			panic("heavy task panic")
 		},
 	}
@@ -630,7 +1168,7 @@ func TestTaskWorkerContinuesAfterHeavyTaskPanic(t *testing.T) {
 		taskType:  telegramTaskCover,
 		mediaType: mediaTypeAlbum,
 		mediaID:   "album-next",
-		run: func(*TelegramBot) error {
+		run: func(*TelegramBot, context.Context) error {
 			close(done)
 			return nil
 		},
@@ -688,7 +1226,7 @@ func TestStopDownloadWorkersWaitsForRunningTask(t *testing.T) {
 		taskType:  telegramTaskCover,
 		mediaType: mediaTypeAlbum,
 		mediaID:   "album-1",
-		run: func(bot *TelegramBot) error {
+		run: func(bot *TelegramBot, ctx context.Context) error {
 			close(done)
 			<-release
 			return nil
@@ -719,6 +1257,53 @@ func TestStopDownloadWorkersWaitsForRunningTask(t *testing.T) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("stopDownloadWorkers did not wait for task completion")
+	}
+}
+
+func TestWaitBackgroundTasksWaitsForRunningTask(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := &TelegramBot{
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if !b.launchBackgroundTask("test background task", func(ctx context.Context) {
+		close(started)
+		<-release
+	}) {
+		t.Fatalf("expected background task to launch")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("background task did not start")
+	}
+
+	if b.waitBackgroundTasks(100 * time.Millisecond) {
+		t.Fatalf("waitBackgroundTasks returned before background task completed")
+	}
+
+	close(release)
+
+	if !b.waitBackgroundTasks(5 * time.Second) {
+		t.Fatalf("waitBackgroundTasks did not observe background task completion")
+	}
+}
+
+func TestLaunchBackgroundTaskRefusesAfterShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	b := &TelegramBot{
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+	}
+	if b.launchBackgroundTask("test background task", func(ctx context.Context) {}) {
+		t.Fatalf("expected background task launch to be rejected after shutdown")
 	}
 }
 
@@ -821,6 +1406,83 @@ func TestDailyRestartTaskLoadIdle(t *testing.T) {
 
 	if load.hasPendingWork() {
 		t.Fatalf("expected idle load, got %+v", load)
+	}
+}
+
+func TestCancelChatRequestCancelsRunningRequest(t *testing.T) {
+	canceled := make(chan struct{}, 1)
+	b := &TelegramBot{
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-running": {RequestID: "req-running", ChatID: 42, State: "running", UpdatedAt: time.Now()},
+		},
+		runningRequestCtx: make(map[string]context.CancelFunc),
+	}
+	b.runningRequestCtx["req-running"] = func() {
+		select {
+		case canceled <- struct{}{}:
+		default:
+		}
+	}
+
+	state, ok := b.cancelChatRequest(42, "req-running")
+	if !ok {
+		t.Fatalf("expected running request to be cancelable")
+	}
+	if state != "running" {
+		t.Fatalf("expected running state, got %q", state)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("expected running request cancel func to be invoked")
+	}
+}
+
+func TestWorkerSkipsCanceledQueuedRequest(t *testing.T) {
+	var ran bool
+	b := &TelegramBot{
+		downloadQueue:      make(chan *downloadRequest, 1),
+		workerLimit:        1,
+		activeRequests:     map[string]telegramPersistedRequest{"req-1": {RequestID: "req-1", ChatID: 42, State: "queued", MediaType: mediaTypeSong, MediaID: "song-1"}},
+		inflightDownloads:  map[string]struct{}{"song-1": {}},
+		canceledRequestIDs: map[string]struct{}{"req-1": {}},
+		runningRequestCtx:  make(map[string]context.CancelFunc),
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.startDownloadWorker()
+	b.downloadQueue <- &downloadRequest{
+		requestID:   "req-1",
+		taskType:    telegramTaskCover,
+		mediaType:   mediaTypeSong,
+		mediaID:     "song-1",
+		inflightKey: "song-1",
+		run: func(*TelegramBot, context.Context) error {
+			ran = true
+			return nil
+		},
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if len(b.chatTrackedRequests(42)) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected canceled queued request to be untracked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	b.stopDownloadWorkers()
+
+	if ran {
+		t.Fatalf("expected canceled request runner to be skipped")
+	}
+	b.inflightMu.Lock()
+	_, ok := b.inflightDownloads["song-1"]
+	b.inflightMu.Unlock()
+	if ok {
+		t.Fatalf("expected inflight lock to be released")
 	}
 }
 

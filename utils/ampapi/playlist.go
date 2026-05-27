@@ -2,13 +2,10 @@ package ampapi
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 
-	nethttp "github.com/wuuduf/applemusic-telegram-bot/utils/nethttp"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
 )
 
@@ -17,41 +14,22 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 }
 
 func GetPlaylistRespWithContext(ctx context.Context, storefront string, id string, language string, token string) (*PlaylistResp, error) {
-	var err error
-	if token == "" {
-		token, err = GetToken()
+	obj := new(PlaylistResp)
+	err := doJSONWithRetry(ctx, token, obj, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL(fmt.Sprintf("/v1/catalog/%s/playlists/%s", storefront, id)), nil)
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", storefront, id), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Origin", "https://music.apple.com")
-	query := url.Values{}
-	query.Set("omit[resource]", "autos")
-	query.Set("include", "tracks,artists,record-labels")
-	query.Set("include[songs]", "artists")
-	//query.Set("fields[artists]", "name,artwork")
-	//query.Set("fields[albums:albums]", "artistName,artwork,name,releaseDate,url")
-	//query.Set("fields[record-labels]", "name")
-	query.Set("extend", "editorialVideo,extendedAssetUrls")
-	query.Set("l", language)
-	req.URL.RawQuery = query.Encode()
-	do, err := nethttp.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return nil, errors.New(do.Status)
-	}
-	obj := new(PlaylistResp)
-	err = json.NewDecoder(do.Body).Decode(&obj)
+		setAppleMusicHeaders(req, token, "")
+		query := url.Values{}
+		query.Set("omit[resource]", "autos")
+		query.Set("include", "tracks,artists,record-labels")
+		query.Set("include[songs]", "artists")
+		query.Set("extend", "editorialVideo,extendedAssetUrls")
+		query.Set("l", language)
+		req.URL.RawQuery = query.Encode()
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -59,41 +37,8 @@ func GetPlaylistRespWithContext(ctx context.Context, storefront string, id strin
 	if err != nil {
 		return nil, err
 	}
-	if len(firstData.Relationships.Tracks.Next) > 0 {
-		next := firstData.Relationships.Tracks.Next
-		for {
-			req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com%s", next), nil)
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-			req.Header.Set("Origin", "https://music.apple.com")
-			query := req.URL.Query()
-			query.Set("omit[resource]", "autos")
-			query.Set("include", "artists")
-			query.Set("extend", "editorialVideo,extendedAssetUrls")
-			req.URL.RawQuery = query.Encode()
-			do, err := nethttp.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			if do.StatusCode != http.StatusOK {
-				do.Body.Close()
-				return nil, errors.New(do.Status)
-			}
-			obj2 := new(TrackResp)
-			err = json.NewDecoder(do.Body).Decode(&obj2)
-			do.Body.Close()
-			if err != nil {
-				return nil, err
-			}
-			firstData.Relationships.Tracks.Data = append(firstData.Relationships.Tracks.Data, obj2.Data...)
-			next = obj2.Next
-			if len(next) == 0 {
-				break
-			}
-		}
+	if err := appendPagedTrackResults(ctx, token, firstData.Relationships.Tracks.Next, &firstData.Relationships.Tracks.Data); err != nil {
+		return nil, err
 	}
 	return obj, nil
 }

@@ -331,6 +331,37 @@ func TestParseTelegramRetryAfterFromDescription(t *testing.T) {
 	}
 }
 
+func TestSanitizeTelegramLogArgsRedactsTokenFromErrorsAndStrings(t *testing.T) {
+	args := sanitizeTelegramLogArgs("123:secret-token", errors.New("request failed: /bot123:secret-token/sendMessage"), "raw 123:secret-token value", 42)
+	if len(args) != 3 {
+		t.Fatalf("unexpected arg count: %d", len(args))
+	}
+	errText, ok := args[0].(string)
+	if !ok || strings.Contains(errText, "123:secret-token") || !strings.Contains(errText, "<redacted-token>") {
+		t.Fatalf("expected error arg to be redacted, got %#v", args[0])
+	}
+	strText, ok := args[1].(string)
+	if !ok || strings.Contains(strText, "123:secret-token") || !strings.Contains(strText, "<redacted-token>") {
+		t.Fatalf("expected string arg to be redacted, got %#v", args[1])
+	}
+	if args[2] != 42 {
+		t.Fatalf("expected non-string arg to remain untouched, got %#v", args[2])
+	}
+}
+
+func TestTelegramLogPrintfRedactsToken(t *testing.T) {
+	bot := &TelegramBot{token: "123:secret-token"}
+	out := captureStdoutForTest(t, func() {
+		bot.logTelegramPrintf("telegram failed: %v %s\n", errors.New("url=/bot123:secret-token/sendMessage"), "raw=123:secret-token")
+	})
+	if strings.Contains(out, "123:secret-token") {
+		t.Fatalf("expected token to be redacted, got %q", out)
+	}
+	if !strings.Contains(out, "<redacted-token>") {
+		t.Fatalf("expected redacted token marker, got %q", out)
+	}
+}
+
 func TestPendingSelectionIsolatedByMessageID(t *testing.T) {
 	chatID := int64(1001)
 	b := &TelegramBot{
@@ -708,6 +739,139 @@ func TestHandleCommandCoverQueuesHeavyTask(t *testing.T) {
 	}
 	if req.mediaType != mediaTypeSong || req.mediaID != "12345" {
 		t.Fatalf("unexpected queued cover request: %+v", req)
+	}
+}
+
+func TestHandleCommandStatusReportsQueueAndChatStats(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			messages = append(messages, text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:             "test-token",
+		apiBase:           server.URL,
+		client:            server.Client(),
+		downloadQueue:     make(chan *downloadRequest, 3),
+		workerLimit:       2,
+		inflightDownloads: map[string]struct{}{"song:1": {}},
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-running": {RequestID: "req-running", ChatID: 42, TaskType: telegramTaskDownload, MediaType: mediaTypeSong, MediaID: "song-1", State: "running", UpdatedAt: time.Now()},
+			"req-queued":  {RequestID: "req-queued", ChatID: 42, TaskType: telegramTaskCover, MediaType: mediaTypeAlbum, MediaID: "album-1", State: "queued", UpdatedAt: time.Now()},
+			"req-other":   {RequestID: "req-other", ChatID: 99, TaskType: telegramTaskSongLyrics, MediaType: mediaTypeSong, MediaID: "song-9", State: "queued", UpdatedAt: time.Now()},
+		},
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+	bot.downloadQueue <- &downloadRequest{requestID: "buffered"}
+	bot.activeWorkers = 1
+
+	bot.handleCommand(42, "private", "status", nil, 7)
+
+	if len(messages) == 0 {
+		t.Fatalf("expected status message")
+	}
+	text := messages[len(messages)-1]
+	for _, want := range []string{
+		"Bot status:",
+		"queue=1 running=1/2 tracked=3 inflight=1",
+		"this chat: queued=1 running=1",
+		"next task:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in status text, got %q", want, text)
+		}
+	}
+}
+
+func TestHandleCommandQueueListsOnlyCurrentChatRequests(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			messages = append(messages, text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:   "test-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+		activeRequests: map[string]telegramPersistedRequest{
+			"req-running": {RequestID: "req-running", ChatID: 42, TaskType: telegramTaskDownload, MediaType: mediaTypeSong, MediaID: "song-1", State: "running", UpdatedAt: time.Now()},
+			"req-queued":  {RequestID: "req-queued", ChatID: 42, TaskType: telegramTaskCover, MediaType: mediaTypeAlbum, MediaID: "album-1", State: "queued", UpdatedAt: time.Now()},
+			"req-other":   {RequestID: "req-other", ChatID: 99, TaskType: telegramTaskSongLyrics, MediaType: mediaTypeSong, MediaID: "song-9", State: "queued", UpdatedAt: time.Now()},
+		},
+	}
+
+	bot.handleCommand(42, "private", "queue", nil, 0)
+
+	if len(messages) == 0 {
+		t.Fatalf("expected queue message")
+	}
+	text := messages[len(messages)-1]
+	if !strings.Contains(text, "req-running") || !strings.Contains(text, "req-queued") {
+		t.Fatalf("expected current chat requests in queue text, got %q", text)
+	}
+	if strings.Contains(text, "req-other") {
+		t.Fatalf("did not expect other chat request in queue text: %q", text)
+	}
+	if !strings.Contains(text, "Use /cancel <request_id>") {
+		t.Fatalf("expected cancel hint in queue text, got %q", text)
+	}
+}
+
+func TestHandleCommandCancelQueuedRequest(t *testing.T) {
+	var messages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		payload := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if text, _ := payload["text"].(string); text != "" {
+			messages = append(messages, text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer server.Close()
+
+	bot := &TelegramBot{
+		token:              "test-token",
+		apiBase:            server.URL,
+		client:             server.Client(),
+		activeRequests:     map[string]telegramPersistedRequest{"req-queued": {RequestID: "req-queued", ChatID: 42, TaskType: telegramTaskCover, MediaType: mediaTypeSong, MediaID: "song-1", State: "queued", UpdatedAt: time.Now()}},
+		canceledRequestIDs: make(map[string]struct{}),
+	}
+	bot.queueCond = sync.NewCond(&bot.queueMu)
+
+	bot.handleCommand(42, "private", "cancel", []string{"req-queued"}, 0)
+
+	if _, ok := bot.activeRequests["req-queued"]; ok {
+		t.Fatalf("expected queued request to be removed from active requests")
+	}
+	if !bot.isRequestCanceled("req-queued") {
+		t.Fatalf("expected queued request to be marked canceled")
+	}
+	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1], "Canceled queued task: req-queued") {
+		t.Fatalf("expected cancel confirmation, got %+v", messages)
 	}
 }
 

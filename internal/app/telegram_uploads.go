@@ -212,7 +212,7 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			fmt.Printf("%s canceled before attempt %d/%d: %v\n", label, attempt, maxAttempts, err)
+			b.logTelegramPrintf("%s canceled before attempt %d/%d: %v\n", label, attempt, maxAttempts, err)
 			return err
 		}
 		lastErr = fn()
@@ -236,7 +236,7 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 			return lastErr
 		}
 		if status != nil {
-			phase := fmt.Sprintf("Upload interrupted, retrying (%d/%d)", attempt+1, maxAttempts)
+			var phase string
 			if hasRetryAfter {
 				phase = fmt.Sprintf("%s rate limited, retry after %ds (%d/%d)", label, int(retryAfter.Seconds()), attempt+1, maxAttempts)
 			} else {
@@ -249,14 +249,14 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 		if hasRetryAfter {
 			fmt.Printf("%s waiting %s before retry %d/%d\n", label, retryAfter.Round(time.Second), attempt+1, maxAttempts)
 			if err := sleepWithContext(ctx, retryAfter); err != nil {
-				fmt.Printf("%s retry wait canceled: %v\n", label, err)
+				b.logTelegramPrintf("%s retry wait canceled: %v\n", label, err)
 				return err
 			}
 		} else {
 			wait := time.Duration(attempt) * time.Second
 			fmt.Printf("%s waiting %s before retry %d/%d\n", label, wait, attempt+1, maxAttempts)
 			if err := sleepWithContext(ctx, wait); err != nil {
-				fmt.Printf("%s retry wait canceled: %v\n", label, err)
+				b.logTelegramPrintf("%s retry wait canceled: %v\n", label, err)
 				return err
 			}
 		}
@@ -293,7 +293,7 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 			finalErr = nil
 			break
 		}
-		finalErr = fmt.Errorf("sendAudio failed: %v; sendDocument fallback failed: %v", audioErr, docErr)
+		finalErr = fmt.Errorf("sendAudio failed: %s; sendDocument fallback failed: %s", b.sanitizeTelegramErr(audioErr), b.sanitizeTelegramErr(docErr))
 	case ".mp4", ".m4v", ".mov":
 		finalErr = b.sendWithRetry(uploadCtx, status, "Video upload", 2, func() error {
 			return b.sendMusicVideoFile(session, chatID, filePath, replyToID, status, settings)
@@ -305,7 +305,7 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 	}
 	if finalErr != nil {
 		appRuntimeMetrics.recordUploadFailure()
-		fmt.Printf("telegram send file failed chat=%d path=%s elapsed=%s err=%s\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond), sanitizeTelegramError(finalErr, b.token))
+		b.logTelegramPrintf("telegram send file failed chat=%d path=%s elapsed=%s err=%v\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond), finalErr)
 	} else {
 		appRuntimeMetrics.recordUploadSuccess()
 		fmt.Printf("telegram send file finished chat=%d path=%s elapsed=%s\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond))
@@ -364,7 +364,7 @@ func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64,
 		if docErr := b.sendDocumentFileWithContext(uploadCtx, chatID, filePath, filepath.Base(filePath), replyToID, status, documentCacheKey); docErr == nil {
 			return nil
 		} else {
-			return fmt.Errorf("sendVideo failed: %v; sendDocument fallback failed: %v", err, docErr)
+			return fmt.Errorf("sendVideo failed: %s; sendDocument fallback failed: %s", b.sanitizeTelegramErr(err), b.sanitizeTelegramErr(docErr))
 		}
 	}
 }
@@ -1568,14 +1568,15 @@ func (b *TelegramBot) forwardSongAudioToArchiveAsync(sourceChatID int64, trackID
 	}
 	forwardEntry := cloneCachedAudioEntry(entry)
 	trackID = strings.TrimSpace(trackID)
-	go func() {
-		runWithRecovery("telegram archive forward", nil, func() {
-			if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, forwardEntry, 0, trackID); err != nil {
-				fmt.Printf("telegram archive forward failed source=%d target=%d track=%s err=%v\n", sourceChatID, targetChatID, trackID, err)
-				appendRuntimeErrorLogf("telegram archive forward failed source=%d target=%d track=%s err=%v", sourceChatID, targetChatID, trackID, err)
-			}
-		})
-	}()
+	_ = b.launchBackgroundTask("telegram archive forward", func(ctx context.Context) {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, forwardEntry, 0, trackID); err != nil {
+			b.logTelegramPrintf("telegram archive forward failed source=%d target=%d track=%s err=%v\n", sourceChatID, targetChatID, trackID, err)
+			b.appendTelegramRuntimeErrorLogf("telegram archive forward failed source=%d target=%d track=%s err=%v", sourceChatID, targetChatID, trackID, err)
+		}
+	})
 }
 
 func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAudio, replyToID int, trackID string, enableSongComment bool, enableArchiveForward bool) error {

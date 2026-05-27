@@ -81,6 +81,8 @@ telegram-download-folder: ""      # Optional override for downloads
 telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP). Docker 推荐挂目录并设为 /app/runtime/telegram-cache.json，避免单文件 bind mount rename EBUSY
 telegram-state-file: ""           # Runtime state snapshot path (pending panels + queued/in-flight tasks). Empty -> auto (cache basename + .state.json)
 telegram-metrics-interval-sec: 60  # Periodic metrics/health log interval
+telegram-metrics-listen-addr: ""   # Optional HTTP metrics bind address, e.g. 127.0.0.1:9090 (empty = disabled)
+telegram-subscription-check-interval-sec: 1800 # Admin subscription poll interval for new artist albums
 telegram-resource-check-interval-sec: 30  # Resource guard re-check interval
 telegram-min-free-disk-mb: 512    # Minimum free space required on download roots before accepting new tasks
 telegram-min-free-tmp-mb: 256     # Minimum free space required on temp directory before accepting new tasks

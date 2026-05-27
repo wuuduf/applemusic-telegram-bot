@@ -68,6 +68,9 @@ func (w *Key) GetKey(ctx context.Context, licenseServerURL string, PSSH string, 
 	}
 
 	keys, err := cdm.GetLicenseKeys(licenseRequest, licenseResponse)
+	if err != nil {
+		return "", keybt, err
+	}
 	command := ""
 
 	for _, key := range keys {

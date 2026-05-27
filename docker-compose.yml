@@ -57,7 +57,13 @@ services:
   # 多账号方案下 bot 配置完全不动，仍然指向 :10020 / :20020；
   # 这两个端口由 wrapper-shim 提供，背后是 wrapper-manager 的 gRPC。
   wrapper-manager:
-    image: ghcr.io/worldobservationlog/wrapper-manager:latest
+    # wrapper-manager 没有官方 GHCR 镜像，需要从源码构建。
+    # 部署前请把 https://github.com/WorldObservationLog/wrapper-manager
+    # 克隆到本仓库的兄弟目录，使其可通过 ../wrapper-manager 访问。
+    build:
+      context: ../wrapper-manager
+      dockerfile: Dockerfile
+    image: applemusic-telegram-bot/wrapper-manager:local
     container_name: wrapper-manager
     restart: unless-stopped
     profiles: ["manager"]
@@ -67,10 +73,12 @@ services:
       - SYS_ADMIN
     command: ["-host", "0.0.0.0", "-port", "8080"]
     ports:
-      # 仅在你需要从宿主机直接发 gRPC（比如登录账号）时暴露
-      - "8080:8080"
+      # 暴露给宿主机以便登录脚本（tools/login.py）调用 gRPC。
+      # 不想暴露公网就只绑回环：- "127.0.0.1:8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
-      - "./wrapper-manager/data:/app/data"
+      # 账号持久化目录，里面会出现 instances.json 和每个账号的子目录
+      - "./wrapper-manager-data:/app/data"
 
   wrapper-shim:
     build:

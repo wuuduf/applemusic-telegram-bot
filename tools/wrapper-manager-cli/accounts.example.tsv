@@ -1,0 +1,14 @@
+# wmcli batch-login input file.
+#
+# One account per line, fields separated by a TAB:
+#
+#     <AppleID>\t<password>
+#
+# 2FA codes are NEVER read from this file (Apple 2FA codes are time-limited
+# and you'll be prompted on stdin per-account anyway). Lines starting with
+# '#' and blank lines are ignored.
+#
+# Example (replace with real credentials, then chmod 600 it):
+#
+# alice@example.com	correct-horse-battery-staple
+# bob@example.com	letmein

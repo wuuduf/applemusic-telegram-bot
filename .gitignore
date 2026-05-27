@@ -59,3 +59,15 @@ wrapper-shim/wrapper-shim
 wrapper-shim/wrapper-shim-bin
 wrapper-shim/dist/
 wrapper-shim/out/
+
+# wrapper-manager admin CLI + top-level Makefile
+!Makefile
+!tools/
+!tools/**
+# Operator credential files MUST NOT land in git. Allow only the example.
+tools/wrapper-manager-cli/accounts.tsv
+tools/wrapper-manager-cli/accounts.*.tsv
+!tools/wrapper-manager-cli/accounts.example.tsv
+
+# wrapper-manager runtime data (account state) is always local-only.
+wrapper-manager-data/

@@ -68,6 +68,10 @@ wrapper-shim/out/
 tools/wrapper-manager-cli/accounts.tsv
 tools/wrapper-manager-cli/accounts.*.tsv
 !tools/wrapper-manager-cli/accounts.example.tsv
+# Python build artifacts inside the tools tree
+tools/**/__pycache__/
+tools/**/*.pyc
+tools/**/*.pyo
 
 # wrapper-manager runtime data (account state) is always local-only.
 wrapper-manager-data/

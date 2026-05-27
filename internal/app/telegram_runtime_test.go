@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1560,4 +1562,135 @@ func TestTelegramLoopReturnsAfterConsecutiveGetUpdatesErrors(t *testing.T) {
 
 func jsonMarshalIndentForTest(v any) ([]byte, error) {
 	return json.MarshalIndent(v, "", "  ")
+}
+
+func TestStopDownloadWorkersUnblocksWaitingWorker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 1),
+		workerLimit:       1,
+		activeWorkers:     1, // Pretend a worker is already busy so the new one parks on Wait.
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    make(map[string]telegramPersistedRequest),
+		shutdownCtx:       ctx,
+		shutdownCancel:    cancel,
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.startDownloadWorker()
+
+	var ranTask atomic.Bool
+	b.downloadQueue <- &downloadRequest{
+		requestID: "req-blocked",
+		taskType:  telegramTaskCover,
+		mediaType: mediaTypeAlbum,
+		mediaID:   "album-blocked",
+		run: func(bot *TelegramBot, ctx context.Context) error {
+			ranTask.Store(true)
+			return nil
+		},
+	}
+
+	// Give a worker time to dequeue the request and enter queueCond.Wait.
+	time.Sleep(100 * time.Millisecond)
+
+	cancel() // Trigger shutdown so the wait predicate flips to false.
+	stopped := make(chan struct{})
+	go func() {
+		b.stopDownloadWorkers()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("stopDownloadWorkers did not return after shutdown signal; worker is stuck on queueCond.Wait")
+	}
+
+	if ranTask.Load() {
+		t.Fatalf("blocked worker should not have run the task after shutdown was requested")
+	}
+}
+
+func TestRotateRuntimeErrorLogIfNeededRenamesAtThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "telegram-error.log")
+	if err := os.WriteFile(logPath, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("seed write failed: %v", err)
+	}
+	backupPath := logPath + runtimeErrorLogBackupSuffix
+
+	// Below threshold: nothing happens.
+	rotateRuntimeErrorLogIfNeededLocked(logPath, 1024)
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("backup unexpectedly created below threshold: %v", err)
+	}
+
+	// At/above threshold: file rotates to .1 and the original is gone.
+	rotateRuntimeErrorLogIfNeededLocked(logPath, 5)
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected current log to be rotated away, stat err=%v", err)
+	}
+	backup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backup) != "0123456789" {
+		t.Fatalf("backup content mismatch: %q", string(backup))
+	}
+}
+
+func TestRotateRuntimeErrorLogIfNeededReplacesExistingBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "telegram-error.log")
+	backupPath := logPath + runtimeErrorLogBackupSuffix
+	if err := os.WriteFile(backupPath, []byte("OLD-BACKUP"), 0o600); err != nil {
+		t.Fatalf("seed backup failed: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("FRESH-CONTENT-12345"), 0o600); err != nil {
+		t.Fatalf("seed log failed: %v", err)
+	}
+
+	rotateRuntimeErrorLogIfNeededLocked(logPath, 5)
+
+	backup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backup) != "FRESH-CONTENT-12345" {
+		t.Fatalf("expected backup to contain the rotated-away content, got %q", string(backup))
+	}
+}
+
+func TestAppendRuntimeErrorLogRotatesWhenOverMaxSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "telegram-error.log")
+	oldPath := currentRuntimeErrorLogPath()
+	setRuntimeErrorLogPath(logPath)
+	defer setRuntimeErrorLogPath(oldPath)
+
+	oldMaxFn := runtimeErrorLogMaxBytesFn
+	runtimeErrorLogMaxBytesFn = func() int64 { return 200 }
+	defer func() { runtimeErrorLogMaxBytesFn = oldMaxFn }()
+
+	// Each line is roughly the timestamp + message + newline (~70+ bytes).
+	for i := 0; i < 20; i++ {
+		appendRuntimeErrorLog(fmt.Sprintf("event %02d that pads the log line a bit", i))
+	}
+
+	backupPath := logPath + runtimeErrorLogBackupSuffix
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("expected rotated backup at %s after exceeding threshold: %v", backupPath, err)
+	}
+
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat current log failed: %v", err)
+	}
+	// Current log should have started fresh after rotation, so it must
+	// be far smaller than the cumulative payload of all 20 lines.
+	if info.Size() > 1024 {
+		t.Fatalf("current log expected to be small after rotation, got %d bytes", info.Size())
+	}
 }

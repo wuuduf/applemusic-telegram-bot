@@ -373,6 +373,7 @@ func appendRuntimeErrorLog(message string) {
 		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
 		return
 	}
+	rotateRuntimeErrorLogIfNeededLocked(path, runtimeErrorLogMaxBytesFn())
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, telegramCacheFilePerm)
 	if err != nil {
 		fmt.Printf("telegram error log write skipped (%s): %v\n", path, err)
@@ -392,6 +393,49 @@ func appendRuntimeErrorLog(message string) {
 
 func appendRuntimeErrorLogf(format string, args ...any) {
 	appendRuntimeErrorLog(fmt.Sprintf(format, args...))
+}
+
+const (
+	defaultRuntimeErrorLogMaxBytes = 10 * 1024 * 1024
+	runtimeErrorLogBackupSuffix    = ".1"
+)
+
+// runtimeErrorLogMaxBytesFn returns the maximum size of the runtime error
+// log file before it is rotated. Exposed as a variable so tests can shrink
+// the threshold without depending on environment variables.
+var runtimeErrorLogMaxBytesFn = func() int64 {
+	if mb, ok := parsePositiveIntEnv("AMDL_TELEGRAM_ERROR_LOG_MAX_MB"); ok {
+		return int64(mb) * 1024 * 1024
+	}
+	return defaultRuntimeErrorLogMaxBytes
+}
+
+// rotateRuntimeErrorLogIfNeededLocked rotates the runtime error log when it
+// exceeds maxBytes. The current file is moved to <path>.1 (replacing any
+// previous backup); if the rename fails the file is truncated so a stuck
+// rotation can never let the log grow without bound. Caller must hold
+// runtimeErrorLogMu.
+func rotateRuntimeErrorLogIfNeededLocked(path string, maxBytes int64) {
+	if path == "" || maxBytes <= 0 {
+		return
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return
+	}
+	if !info.Mode().IsRegular() {
+		return
+	}
+	if info.Size() < maxBytes {
+		return
+	}
+	backup := path + runtimeErrorLogBackupSuffix
+	_ = os.Remove(backup)
+	if err := os.Rename(path, backup); err != nil {
+		if truncErr := os.Truncate(path, 0); truncErr != nil {
+			fmt.Printf("telegram error log rotation failed (%s): rename=%v truncate=%v\n", path, err, truncErr)
+		}
+	}
 }
 
 func setSearchMeta(trackID string, title string, performer string) {
@@ -2979,10 +3023,10 @@ func (b *TelegramBot) startDownloadWorker() {
 				}
 				func() {
 					b.queueMu.Lock()
-					for b.activeWorkers >= b.workerLimit && !b.isRequestCanceled(req.requestID) {
+					for b.activeWorkers >= b.workerLimit && !b.isRequestCanceled(req.requestID) && !b.isShuttingDown() {
 						b.queueCond.Wait()
 					}
-					if b.consumeCanceledRequest(req.requestID) {
+					if b.isShuttingDown() || b.consumeCanceledRequest(req.requestID) {
 						b.queueMu.Unlock()
 						if strings.TrimSpace(req.requestID) != "" {
 							b.untrackRequest(req.requestID)
@@ -3074,6 +3118,14 @@ func (b *TelegramBot) stopDownloadWorkers() {
 		if b.downloadQueue != nil {
 			close(b.downloadQueue)
 		}
+		// Wake workers that are blocked on queueCond.Wait so they observe
+		// the shutdown signal and exit instead of hanging until another
+		// task happens to broadcast.
+		b.queueMu.Lock()
+		if b.queueCond != nil {
+			b.queueCond.Broadcast()
+		}
+		b.queueMu.Unlock()
 	})
 	b.workerWG.Wait()
 }

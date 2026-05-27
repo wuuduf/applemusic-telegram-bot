@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -145,6 +146,7 @@ func resetAMPAPITestState(t *testing.T) {
 	appleMusicTokenCache.mu.Lock()
 	appleMusicTokenCache.token = ""
 	appleMusicTokenCache.fetchedAt = time.Time{}
+	appleMusicTokenCache.inflight = nil
 	appleMusicTokenCache.mu.Unlock()
 	if t != nil {
 		t.Cleanup(func() {
@@ -155,6 +157,7 @@ func resetAMPAPITestState(t *testing.T) {
 			appleMusicTokenCache.mu.Lock()
 			appleMusicTokenCache.token = ""
 			appleMusicTokenCache.fetchedAt = time.Time{}
+			appleMusicTokenCache.inflight = nil
 			appleMusicTokenCache.mu.Unlock()
 		})
 	}
@@ -178,4 +181,73 @@ func TestParseRetryAfterHeaderHTTPDate(t *testing.T) {
 func ExampleAPIError() {
 	fmt.Println((&APIError{Status: "500 Internal Server Error", Body: "oops"}).Error())
 	// Output: apple music api error: status=500 Internal Server Error body="oops"
+}
+
+func TestGetTokenWithContextSharesInflightFetch(t *testing.T) {
+	resetAMPAPITestState(t)
+
+	var fetchCount int32
+	fetchSignal := make(chan struct{})
+	fetchHold := make(chan struct{})
+
+	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			// Only the leader's first homepage hit should arrive here while the
+			// hold channel is open. Followers must join the inflight fetch
+			// instead of issuing their own HTTP request.
+			if atomic.AddInt32(&fetchCount, 1) == 1 {
+				close(fetchSignal)
+				<-fetchHold
+			}
+			_, _ = w.Write([]byte(`<html><script src="/assets/index~abc.js"></script></html>`))
+		case "/assets/index~abc.js":
+			_, _ = w.Write([]byte(`window.__TOKEN__="eyJh.singleflight-token";`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer webServer.Close()
+
+	appleMusicWebBaseURL = webServer.URL
+
+	const callers = 8
+	var (
+		wg      sync.WaitGroup
+		results = make([]string, callers)
+		errs    = make([]error, callers)
+	)
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			tok, err := getTokenWithContext(context.Background(), false)
+			results[idx] = tok
+			errs[idx] = err
+		}(i)
+	}
+
+	// Wait until the leader's request lands at the server, then give the
+	// follower goroutines a moment to enter the inflight-join branch.
+	select {
+	case <-fetchSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first token fetch did not arrive at server")
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(fetchHold)
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d returned error: %v", i, err)
+		}
+		if results[i] != "eyJh.singleflight-token" {
+			t.Fatalf("caller %d got token %q, want shared singleflight token", i, results[i])
+		}
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("expected exactly 1 homepage fetch under inflight join, got %d", got)
+	}
 }

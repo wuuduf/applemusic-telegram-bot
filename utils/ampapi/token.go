@@ -27,19 +27,47 @@ func getTokenWithContext(ctx context.Context, force bool) (string, error) {
 	}
 
 	appleMusicTokenCache.mu.Lock()
-	defer appleMusicTokenCache.mu.Unlock()
+
+	// If a fetch is already in progress, join it. This is the freshest
+	// available signal regardless of cache state, so even forced refreshes
+	// piggy-back instead of stampeding Apple.
+	if inflight := appleMusicTokenCache.inflight; inflight != nil {
+		appleMusicTokenCache.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-inflight.done:
+			return inflight.token, inflight.err
+		}
+	}
 
 	if !force && appleMusicTokenCache.token != "" && nowFunc().Sub(appleMusicTokenCache.fetchedAt) < tokenCacheTTL {
-		return appleMusicTokenCache.token, nil
+		token := appleMusicTokenCache.token
+		appleMusicTokenCache.mu.Unlock()
+		return token, nil
 	}
 
+	// We are the leader. Publish an inflight handle so concurrent callers
+	// join us instead of issuing parallel fetches, then drop the mutex
+	// before doing any network I/O.
+	fetch := &appleMusicTokenFetch{done: make(chan struct{})}
+	appleMusicTokenCache.inflight = fetch
+	appleMusicTokenCache.mu.Unlock()
+
 	token, err := fetchTokenWithContext(ctx)
-	if err != nil {
-		return "", err
+
+	appleMusicTokenCache.mu.Lock()
+	if err == nil {
+		appleMusicTokenCache.token = token
+		appleMusicTokenCache.fetchedAt = nowFunc()
 	}
-	appleMusicTokenCache.token = token
-	appleMusicTokenCache.fetchedAt = nowFunc()
-	return token, nil
+	appleMusicTokenCache.inflight = nil
+	fetch.token = token
+	fetch.err = err
+	appleMusicTokenCache.mu.Unlock()
+	close(fetch.done)
+
+	return token, err
 }
 
 func fetchTokenWithContext(ctx context.Context) (string, error) {

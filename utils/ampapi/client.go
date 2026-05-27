@@ -33,8 +33,20 @@ var (
 		mu        sync.Mutex
 		token     string
 		fetchedAt time.Time
+		// inflight, when non-nil, is a token fetch in progress.
+		// Concurrent callers join it instead of starting their own
+		// fetch so the mutex is never held during network I/O.
+		inflight *appleMusicTokenFetch
 	}
 )
+
+// appleMusicTokenFetch is shared by all callers that join an in-flight
+// token fetch. Once done is closed, token/err must not be mutated.
+type appleMusicTokenFetch struct {
+	done  chan struct{}
+	token string
+	err   error
+}
 
 type APIError struct {
 	StatusCode int

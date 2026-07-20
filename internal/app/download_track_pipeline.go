@@ -352,8 +352,6 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 	ctx.track.SavePath = ctx.trackPath
 	if err := writeMP4Tags(ctx.track, ctx.lrc, ctx.cfg); err != nil {
 		fmt.Println("⚠ Failed to write tags in media:", err)
-		ctx.session.Counter.Unavailable++
-		return false
 	}
 	convertIfNeeded(ctx.session, ctx.track, ctx.lrc)
 	return true

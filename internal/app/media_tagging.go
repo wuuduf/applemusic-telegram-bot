@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
@@ -41,19 +42,23 @@ func writeMP4Tags(track *task.Track, lrc string, cfg *structs.ConfigSet) error {
 	}
 
 	if track.PreType == "albums" {
-		albumID, err := strconv.ParseUint(track.PreID, 10, 32)
+		albumID, err := strconv.ParseUint(track.PreID, 10, 64)
 		if err != nil {
 			return err
 		}
-		t.ItunesAlbumID = int32(albumID)
+		if albumID <= math.MaxInt32 {
+			t.ItunesAlbumID = int32(albumID)
+		}
 	}
 
 	if artistRef, artistErr := safe.FirstRef("main.writeMP4Tags", "song.relationships.artists.data", track.Resp.Relationships.Artists.Data); artistErr == nil {
-		artistID, err := strconv.ParseUint(artistRef.ID, 10, 32)
+		artistID, err := strconv.ParseUint(artistRef.ID, 10, 64)
 		if err != nil {
 			return err
 		}
-		t.ItunesArtistID = int32(artistID)
+		if artistID <= math.MaxInt32 {
+			t.ItunesArtistID = int32(artistID)
+		}
 	}
 
 	if (track.PreType == "playlists" || track.PreType == "stations") && !cfg.UseSongInfoForPlaylist {

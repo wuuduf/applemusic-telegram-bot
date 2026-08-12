@@ -1,7 +1,5 @@
 services:
-  # ============================================================
-  # ===== Legacy single-account wrapper (default profile) ======
-  # ============================================================
+  # ========== wrapper: 一次性初始化（登录）==========
   # 用法：
   #   docker compose --profile init run --rm wrapper-init
   #
@@ -15,106 +13,40 @@ services:
   # ARM 机器强行跑 x86 镜像也可：
   #   image: jelly714love/wrapper:amd64
   #   platform: linux/amd64
-  wrapper-init:
+  wrapper-init-2:
     # 按你的机器架构修改 image / platform
-    image: jelly714love/wrapper:arm64
-    platform: linux/arm64
-    profiles: ["init"]
+    image: jelly714love/wrapper:amd64
+    platform: linux/amd64
+    profiles: [ "init" ]
     restart: "no"
     environment:
-      # 改成你自己的 Apple 账号登录参数（只在初始化时使用）
-      # 例：-L your_apple_id:your_password -F
-      args: "-L <你的AppleID>:<你的密码> -F"
+      # Apple 账号登录参数（只在初始化时使用）
+      # 账密从项目根目录 .env 注入（.env 已被 .gitignore 排除，不会进入仓库）：
+      #   APPLE_ID=你的Apple账号
+      #   APPLE_PASSWORD=你的Apple密码
+      args: "-L ${APPLE_ID}:${APPLE_PASSWORD} -F"
     volumes:
       - "./rootfs/data:/app/rootfs/data"
 
   # ========== wrapper: 常驻服务 ==========
-  wrapper:
+  wrapper-2:
     # 按你的机器架构修改 image / platform
-    image: jelly714love/wrapper:arm64
-    platform: linux/arm64
-    container_name: wrapper
+    image: jelly714love/wrapper:amd64
+    platform: linux/amd64
+    container_name: wrapper-2
     restart: unless-stopped
-    profiles: ["wrapper"]
     environment:
       # 常驻启动参数，通常不需要改
       args: "-H 0.0.0.0 -M 20020"
-    ports:
-      - "10020:10020"
-      - "20020:20020"
-      - "30020:30020"
+
     volumes:
       - "./rootfs/data:/app/rootfs/data"
 
-  # ============================================================
-  # ====== Multi-account wrapper-manager + shim profile ========
-  # ============================================================
-  # 启动多账号方案：
-  #   docker compose --profile manager up -d
-  # 切换回单账号 wrapper：
-  #   docker compose --profile wrapper up -d wrapper
-  #
-  # 多账号方案下 bot 配置完全不动，仍然指向 :10020 / :20020；
-  # 这两个端口由 wrapper-shim 提供，背后是 wrapper-manager 的 gRPC。
-  wrapper-manager:
-    # wrapper-manager 没有官方 GHCR 镜像，需要从源码构建。
-    # 部署前请把 https://github.com/WorldObservationLog/wrapper-manager
-    # 克隆到本仓库的兄弟目录，使其可通过 ../wrapper-manager 访问。
-    build:
-      context: ../wrapper-manager
-      dockerfile: Dockerfile
-    image: applemusic-telegram-bot/wrapper-manager:local
-    container_name: wrapper-manager
-    restart: unless-stopped
-    profiles: ["manager"]
-    # wrapper-manager 内部需要 PID namespace 隔离 + chroot
-    privileged: true
-    cap_add:
-      - SYS_ADMIN
-    command: ["-host", "0.0.0.0", "-port", "8080"]
-    ports:
-      # 暴露给宿主机以便登录脚本（tools/login.py）调用 gRPC。
-      # 不想暴露公网就只绑回环：- "127.0.0.1:8080:8080"
-      - "127.0.0.1:8080:8080"
-    volumes:
-      # 账号持久化目录，里面会出现 instances.json 和每个账号的子目录
-      - "./wrapper-manager-data:/app/data"
-
-  wrapper-shim:
-    build:
-      context: ./wrapper-shim
-      dockerfile: Dockerfile
-    image: applemusic-telegram-bot/wrapper-shim:local
-    container_name: wrapper-shim
-    restart: unless-stopped
-    profiles: ["manager"]
-    depends_on:
-      - wrapper-manager
-    command:
-      - "-manager"
-      - "wrapper-manager:8080"
-      - "-m3u8-listen"
-      - ":20020"
-      - "-decrypt-listen"
-      - ":10020"
-      - "-wait-ready"
-      - "120s"
-    # 同 wrapper 的端口语义，bot 的 config.yaml 不需要改：
-    #   decrypt-m3u8-port: "wrapper-shim:10020"
-    #   get-m3u8-port:     "wrapper-shim:20020"
-    expose:
-      - "10020"
-      - "20020"
-
-  # ============================================================
-  # ============= Telegram Bot API 本地服务 ====================
-  # ============================================================
-  telegram-bot-api:
+  # ========== Telegram Bot API 本地服务 ==========
+  telegram-bot-api-2:
     image: aiogram/telegram-bot-api:latest
-    container_name: telegram-bot-api
+    container_name: telegram-bot-api-2
     restart: unless-stopped
-    ports:
-      - "8081:8081"
     environment:
       # 下面两个值请改成你自己的
       TELEGRAM_API_ID: "2040"
@@ -127,19 +59,17 @@ services:
     volumes:
       - "./data/telegram-bot-api:/var/lib/telegram-bot-api"
 
-  # ============================================================
-  # ====================== 本项目 Bot ==========================
-  # ============================================================
-  bot:
+  # ========== 本项目 Bot ==========
+  bot-2:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: applemusic-telegram-bot
+    container_name: applemusic-telegram-bot-2
     restart: unless-stopped
-    # depends_on 写两组都允许，profile 决定实际启用哪个。
     depends_on:
-      - telegram-bot-api
-    command: ["--bot"]
+      - wrapper-2
+      - telegram-bot-api-2
+    command: [ "--bot" ]
     environment:
       # 推荐把 token 写在 config.yaml 的 telegram-bot-token。
       # 如果你不想写到 config.yaml，也可以填这里。
@@ -150,24 +80,16 @@ services:
       - "./config.yaml:/app/config.yaml:ro"
       # 下载目录
       - "./downloads:/downloads"
-      # Telegram file_id 缓存目录（避免单文件 bind mount 导致 atomic rename EBUSY）
+      # Telegram file_id 缓存
       - "./bot-runtime:/app/runtime"
 
 # ================== 关键协调关系（必须改 config.yaml）==================
 # 因为 bot 运行在容器内，不能再用 127.0.0.1 指向 wrapper / telegram-bot-api。
+# 请把 /app/config.yaml（即宿主机 ./config.yaml）中的以下项改为：
 #
-# 单账号 wrapper（profile=wrapper）：
-#   decrypt-m3u8-port: "wrapper:10020"
-#   get-m3u8-port: "wrapper:20020"
-#
-# 多账号 wrapper-manager + shim（profile=manager）：
-#   decrypt-m3u8-port: "wrapper-shim:10020"
-#   get-m3u8-port: "wrapper-shim:20020"
-#
-# 公共：
-#   telegram-api-url: "http://telegram-bot-api:8081"
-#   telegram-cache-file: "/app/runtime/telegram-cache.json"
+# decrypt-m3u8-port: "wrapper:10020"
+# get-m3u8-port: "wrapper:20020"
+# telegram-api-url: "http://telegram-bot-api:8081"
 #
 # 启动：
-#   单账号:   docker compose --profile wrapper up -d --build
-#   多账号:   docker compose --profile manager up -d --build
+#   docker compose up -d --build

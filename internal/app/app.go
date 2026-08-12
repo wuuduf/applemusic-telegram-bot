@@ -3875,7 +3875,7 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 	cmd = normalizeTelegramBotCommand(cmd)
 	switch cmd {
 	case "start", "help":
-		_ = b.sendMessage(chatID, b.botHelpTextForChat(chatID), nil)
+		_ = b.sendMessage(chatID, b.botHelpTextForChat(chatID, userID), nil)
 	case "amwhoami":
 		_ = b.sendMessageWithReply(chatID, formatWhoAmIText(userID, chatID), nil, replyToID)
 	case "status":
@@ -8904,7 +8904,7 @@ func (b *TelegramBot) formatAdminPanelText(chatID int64) string {
 		cachePushStatus = "运行中"
 	}
 	if b.getChatLanguage(chatID) == telegramLanguageEn {
-		return fmt.Sprintf("Admin panel\n- Whitelist mode: %s\n- Archive forward: %s\n- Archive chat_id: %s\n- Cache push task: %s\n- Admin users: %d\n- Whitelisted users: %d\n- Blacklisted users: %d",
+		return fmt.Sprintf("Admin panel\n- Whitelist mode: %s\n- Archive forward: %s\n- Archive chat_id: %s\n- Cache push task: %s\n- Admin users: %d\n- Whitelisted users: %d\n- Blacklisted users: %d\n\nAdmin commands:\n/sub artist <link> Subscribe to artist albums\n/sub list|del|pause|resume <...> Manage subscriptions\n/subtemp [...] List temporary subscription releases\n/subrefresh <id> Trigger one final refresh download\n/subrefreshall Trigger refresh for all due releases\n/amwlon /amwloff Toggle whitelist mode\n/amwladd <user_id> Add whitelisted user\n/amwldel <user_id> Remove whitelisted user\n/amban <user_id> Ban a user\n/amunban <user_id> Unban a user\n/amcachepush Push cached audio to archive chat",
 			map[bool]string{true: "ON", false: "OFF"}[b.isUserWhitelistEnabled()],
 			map[bool]string{true: "ON", false: "OFF"}[b.isForwardEnabled()],
 			forwardChatLabel,
@@ -8914,7 +8914,7 @@ func (b *TelegramBot) formatAdminPanelText(chatID int64) string {
 			b.userBlacklistCount(),
 		)
 	}
-	return fmt.Sprintf("管理员面板\n- 白名单模式：%s\n- 归档转发：%s\n- 归档群 chat_id：%s\n- 缓存转存任务：%s\n- 管理员数量：%d\n- 白名单人数：%d\n- 黑名单人数：%d",
+	return fmt.Sprintf("管理员面板\n- 白名单模式：%s\n- 归档转发：%s\n- 归档群 chat_id：%s\n- 缓存转存任务：%s\n- 管理员数量：%d\n- 白名单人数：%d\n- 黑名单人数：%d\n\n管理命令：\n/sub artist <链接> 订阅艺人新专辑\n/sub list|del|pause|resume <...> 管理订阅\n/subtemp [...] 查看临时订阅发布记录\n/subrefresh <id> 触发单个正式刷新下载\n/subrefreshall 触发全部到期刷新\n/amwlon /amwloff 开/关白名单模式\n/amwladd <user_id> 添加白名单用户\n/amwldel <user_id> 移除白名单用户\n/amban <user_id> 封禁用户\n/amunban <user_id> 解除封禁\n/amcachepush 批量转存缓存到归档群",
 		whitelistMode,
 		forwardStatus,
 		forwardChatLabel,
@@ -9405,109 +9405,81 @@ func (b *TelegramBot) buildSettingsKeyboard(settings ChatDownloadSettings) Inlin
 
 func botHelpText() string {
 	return strings.TrimSpace(`
-命令列表（短命令）：
-/h 帮助
-/i 查看当前会话ID（chat_id）；也可按资源ID下载
+🎵 使用说明
+
+【搜索音乐】
 /sg <关键词> 搜索歌曲
 /sa <关键词> 搜索专辑
 /sr <关键词> 搜索艺人
-/s <类型> <关键词> 统一搜索
-/u <Apple Music 链接> 解析并下载链接
-/rf <Apple Music 链接> 强制重下并重传（清缓存，跳过本地复用）
-/ap <艺人-url|艺人-id> 导出艺人主页图+专辑封面+动态封面（逐个/ZIP）
-/cv <url|type id> 仅下载封面
-/ac <url|type id> 仅下载动态封面
-/ly <song|album> 导出歌词文件（格式由设置决定）
-/status 查看全局队列/线程/运行指标
-/queue 查看当前会话的排队/运行任务
-/cancel <request_id> 取消当前会话中的任务
-/sub artist <artist-url|artist-id> 订阅艺人新专辑（仅管理员）
-/sub list [enabled|paused] 查看订阅列表（仅管理员）
-/sub del <subscription_id> 删除订阅（仅管理员）
-/sub pause <subscription_id> 暂停订阅（仅管理员）
-/sub resume <subscription_id> 恢复订阅（仅管理员）
-/subtemp [list|pending|ready|refreshed|artist <关键词>|album <关键词>] 查看临时订阅发布记录（仅管理员）
-/subrefresh <temporary_release_id> 触发单个正式刷新下载（仅管理员）
-/subrefreshall 触发所有到期临时发布的正式刷新下载（仅管理员）
-/st [值] 查看或修改下载设置（音质/AAC/MV/歌词/歌曲ZIP/任务线程/内嵌开关/自动附加/歌曲赏析）
-/amadmin 管理员面板（仅管理员）
-/amwlon 开启用户白名单模式（仅管理员）
-/amwloff 关闭用户白名单模式（仅管理员）
-/amwladd <user_id> 添加白名单用户（仅管理员）
-/amwldel <user_id> 移除白名单用户（仅管理员）
-/amban <user_id> 封禁用户（仅管理员）
-/amunban <user_id> 解除封禁（仅管理员）
-/amcachepush 批量转存缓存音频到归档群（仅管理员）
-/amwhoami 查看当前 user_id / chat_id
+/s <song|album|artist> <关键词> 统一搜索
 
-参数说明：
-- /s 的 <类型>：song | album | artist
-- /cv 的 type：song | album | playlist | station | mv | artist
-- /ac 的 type：song | album | playlist | station
-- /songid /albumid /playlistid /stationid /mvid /artistid 支持一次传多个 ID（空格/逗号/分号分隔）
-- /cancel 的 request_id 可通过 /queue 查看
-- /st 任务线程：worker1 | worker2 | worker3 | worker4（默认 worker1）
-- /st 语言：zh | en
-- /st 赏析：comment | comment_on | comment_off
+【下载与导出】
+/u <链接> 下载（支持歌曲/专辑/歌单/艺人/MV）
+/rf <链接> 强制重新下载（清缓存重传，文件损坏时用）
+/ap <艺人链接> 导出艺人主页图 + 专辑封面合集
+/cv <链接> 只下载封面
+/ac <链接> 只下载动态封面
+/ly <链接> 导出歌词
 
-也支持直接发送 Apple Music 链接（自动识别）：
-song | album | playlist | artist | station | music-video | curator（单条消息可放多个链接）
+【我的任务】
+/status 查看全局运行状态（队列/线程）
+/queue 查看我的排队/运行任务
+/cancel <编号> 取消我的任务（编号用 /queue 查看）
+
+【设置】
+/st 查看或修改下载设置（音质/歌词/打包/线程等）
+
+【其他】
+/i 查看我的 chat_id
+/amwhoami 查看我的 user_id / chat_id
+
+💡 直接把 Apple Music 链接发给我就能下载，自动识别类型，一条消息可放多个链接。
 `)
 }
 
-func (b *TelegramBot) botHelpTextForChat(chatID int64) string {
+func (b *TelegramBot) botHelpTextForChat(chatID int64, userID int64) string {
+	text := botHelpText()
 	if b.getChatLanguage(chatID) == telegramLanguageEn {
-		return strings.TrimSpace(`
-Command list (short aliases):
-/h Help
-/i Show current chat_id; also supports resource-id downloads
+		text = strings.TrimSpace(`
+🎵 How to use
+
+【Search】
 /sg <keywords> Search songs
 /sa <keywords> Search albums
 /sr <keywords> Search artists
-/s <type> <keywords> Unified search
-/u <Apple Music URL> Parse and download URL
-/rf <Apple Music URL> Force refresh and resend (clear cache, skip local reuse)
-/ap <artist-url|artist-id> Export artist photo + album covers + animated covers (one-by-one/ZIP)
-/cv <url|type id> Download static cover only
-/ac <url|type id> Download animated cover only
-/ly <song|album> Export lyrics files (format depends on settings)
-/status Show worker/queue/runtime status
-/queue List queued/running tasks for this chat
-/cancel <request_id> Cancel a queued/running task from this chat
-/sub artist <artist-url|artist-id> Subscribe to new artist albums (admin only)
-/sub list [enabled|paused] List subscriptions (admin only)
-/sub del <subscription_id> Delete a subscription (admin only)
-/sub pause <subscription_id> Pause a subscription (admin only)
-/sub resume <subscription_id> Resume a subscription (admin only)
-/subtemp [list|pending|ready|refreshed|artist <keyword>|album <keyword>] List temporary subscription releases (admin only)
-/subrefresh <temporary_release_id> Trigger one final refresh download (admin only)
-/subrefreshall Trigger final refresh for all eligible temporary releases (admin only)
-/st [value] View or update settings (quality/AAC/MV/lyrics/song ZIP/workers/embed toggles/auto extras/song comment/language)
-/amadmin Admin panel (admin only)
-/amwlon Enable user whitelist mode (admin only)
-/amwloff Disable user whitelist mode (admin only)
-/amwladd <user_id> Add a whitelisted user (admin only)
-/amwldel <user_id> Remove a whitelisted user (admin only)
-/amban <user_id> Ban a user (admin only)
-/amunban <user_id> Unban a user (admin only)
-/amcachepush Push cached audio items to archive chat (admin only)
-/amwhoami Show current user_id / chat_id
+/s <song|album|artist> <keywords> Unified search
 
-Parameters:
-- /s <type>: song | album | artist
-- /cv type: song | album | playlist | station | mv | artist
-- /ac type: song | album | playlist | station
-- /songid /albumid /playlistid /stationid /mvid /artistid accept multiple IDs at once (space/comma/semicolon separated)
-- /cancel request_id comes from /queue
-- /st workers: worker1 | worker2 | worker3 | worker4 (default worker1)
-- /st language: zh | en
-- /st song comment: comment | comment_on | comment_off
+【Download & Export】
+/u <link> Download (song/album/playlist/artist/MV)
+/rf <link> Force re-download (clear cache; use when files are corrupted)
+/ap <artist link> Export artist image + album cover set
+/cv <link> Download cover only
+/ac <link> Download animated cover only
+/ly <link> Export lyrics
 
-You can also send Apple Music URLs directly (auto recognized):
-song | album | playlist | artist | station | music-video | curator (multiple links in one message are supported)
+【My tasks】
+/status View global status (queue/workers)
+/queue View my queued/running tasks
+/cancel <id> Cancel one of my tasks (id from /queue)
+
+【Settings】
+/st View or change download settings (quality/lyrics/zip/workers)
+
+【Other】
+/i Show my chat_id
+/amwhoami Show my user_id / chat_id
+
+💡 You can also just send an Apple Music link directly — type is auto-detected, multiple links per message are supported.
 `)
 	}
-	return botHelpText()
+	if b.isAdminUser(userID) {
+		if b.getChatLanguage(chatID) == telegramLanguageEn {
+			text += "\n\n⚙️ Admin features: open the admin panel with /amadmin (all admin commands are listed there)."
+		} else {
+			text += "\n\n⚙️ 管理员功能：使用 /amadmin 打开管理面板（全部管理命令已收纳在面板中）。"
+		}
+	}
+	return text
 }
 
 func formatChatIDText(chatID int64) string {

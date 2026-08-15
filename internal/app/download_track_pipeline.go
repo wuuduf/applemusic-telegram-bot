@@ -333,6 +333,29 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 				fmt.Println("Failed to write cover.")
 			}
 		}
+		coverPath := strings.TrimSpace(ctx.track.CoverPath)
+		if coverPath != "" {
+			if _, statErr := os.Stat(coverPath); statErr != nil {
+				// 共享封面文件可能已被磁盘配额清理器删除（大专辑下载中途触发清理时）。
+				// 此时重新从 artwork URL 抓取到临时位置，嵌入后清理。
+				artworkURL := ctx.track.Resp.Attributes.Artwork.URL
+				if artworkURL == "" {
+					fmt.Printf("Cover file missing (%s) and no artwork URL available for track %s; skipping cover.\n", coverPath, ctx.track.ID)
+				} else {
+					fmt.Printf("Cover file missing (%s); re-fetching from artwork URL for track %s.\n", coverPath, ctx.track.ID)
+					tmpCoverPath, fetchErr := fetchCoverToTempFile(artworkURL, ctx.cfg)
+					if fetchErr != nil {
+						fmt.Println("Failed to re-fetch cover:", fetchErr)
+					} else {
+						ctx.track.CoverPath = tmpCoverPath
+						defer func() {
+							_ = os.Remove(tmpCoverPath)
+							_ = os.RemoveAll(filepath.Dir(tmpCoverPath))
+						}()
+					}
+				}
+			}
+		}
 		if strings.TrimSpace(ctx.track.CoverPath) != "" {
 			tags = append(tags, fmt.Sprintf("cover=%s", ctx.track.CoverPath))
 		}
@@ -355,6 +378,22 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 	}
 	convertIfNeeded(ctx.session, ctx.track, ctx.lrc)
 	return true
+}
+
+// fetchCoverToTempFile 将 artwork URL 下载为临时封面文件，返回其路径。
+// 用于共享封面文件已被磁盘配额清理器删除的场景：重新抓取到临时位置，
+// 嵌入封面后由调用方负责清理（Remove + RemoveAll 所在目录）。
+func fetchCoverToTempFile(artworkURL string, cfg *structs.ConfigSet) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "amdl-cover-*")
+	if err != nil {
+		return "", err
+	}
+	covPath, err := writeCoverWithConfig(tmpDir, "cover", artworkURL, cfg)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", err
+	}
+	return covPath, nil
 }
 
 func finishTrackDownloadStage(ctx *trackDownloadContext) {

@@ -1006,7 +1006,9 @@ func (s *DownloadStatus) finishFailure() {
 	if s.disabled || s.messageID == 0 {
 		return
 	}
-	s.bot.scheduleAutoDeleteMessage(s.chatID, s.messageID, false)
+	// 失败消息保留更久（10 分钟），让用户能看到明确的失败原因，
+	// 避免"发了链接没响应"的误判；成功后消息仍按常规 2 分钟清理。
+	s.bot.scheduleAutoDeleteMessageAt(s.chatID, s.messageID, false, time.Now().Add(telegramFailureAutoDeleteAfter))
 }
 
 func (s *DownloadStatus) Update(phase string, done, total int64) {

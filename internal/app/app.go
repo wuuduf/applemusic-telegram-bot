@@ -1701,6 +1701,8 @@ const (
 	defaultTelegramDailyRestartDeferCheck     = 30 * time.Second
 	defaultTelegramTemporaryReleaseWindow     = 7 * 24 * time.Hour
 	telegramAutoDeleteAfter                   = 2 * time.Minute
+	// 失败消息保留更久：用户能看到明确的失败原因，避免误判 bot 无响应。
+	telegramFailureAutoDeleteAfter            = 10 * time.Minute
 	minTelegramPollTimeout                    = 35 * time.Second
 	telegramDialTimeout                       = 20 * time.Second
 	telegramTLSHandshakeTimeout               = 30 * time.Second

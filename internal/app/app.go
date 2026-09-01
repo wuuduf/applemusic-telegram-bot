@@ -1702,13 +1702,13 @@ const (
 	defaultTelegramTemporaryReleaseWindow     = 7 * 24 * time.Hour
 	telegramAutoDeleteAfter                   = 2 * time.Minute
 	// 失败消息保留更久：用户能看到明确的失败原因，避免误判 bot 无响应。
-	telegramFailureAutoDeleteAfter            = 10 * time.Minute
-	minTelegramPollTimeout                    = 35 * time.Second
-	telegramDialTimeout                       = 20 * time.Second
-	telegramTLSHandshakeTimeout               = 30 * time.Second
-	uploadNoProgressTimeout                   = 120 * time.Second
-	uploadWatchdogInterval                    = 5 * time.Second
-	uploadProgressBufferSize                  = 32 * 1024
+	telegramFailureAutoDeleteAfter = 10 * time.Minute
+	minTelegramPollTimeout         = 35 * time.Second
+	telegramDialTimeout            = 20 * time.Second
+	telegramTLSHandshakeTimeout    = 30 * time.Second
+	uploadNoProgressTimeout        = 120 * time.Second
+	uploadWatchdogInterval         = 5 * time.Second
+	uploadProgressBufferSize       = 32 * 1024
 )
 
 const (
@@ -3910,6 +3910,8 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 		b.handleSubscriptionRefreshAllCommand(chatID, userID, replyToID)
 	case "search_song":
 		b.handleSearch(chatID, "song", strings.Join(args, " "), replyToID)
+	case "download_song":
+		b.handleDirectSongDownload(chatID, strings.Join(args, " "), replyToID)
 	case "search_album":
 		b.handleSearch(chatID, "album", strings.Join(args, " "), replyToID)
 	case "search_artist":
@@ -4329,6 +4331,8 @@ func normalizeTelegramBotCommand(cmd string) string {
 		return "id"
 	case "sg":
 		return "search_song"
+	case "dg":
+		return "download_song"
 	case "sa":
 		return "search_album"
 	case "sr":
@@ -6225,6 +6229,38 @@ func (b *TelegramBot) searchLanguage() string {
 		lang = strings.TrimSpace(Config.Language)
 	}
 	return lang
+}
+
+// handleDirectSongDownload 实现 /dg 点歌：搜索歌曲并直接下载第一个最匹配的结果，
+// 不弹选择面板。若结果里第一个是歌曲则立即排队下载并反馈歌手+歌名。
+func (b *TelegramBot) handleDirectSongDownload(chatID int64, query string, replyToID int) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		_ = b.sendMessageWithReply(chatID, "Usage: /dg <song name or artist - song>", nil, replyToID)
+		return
+	}
+	items, _, err := b.fetchSearchPage("song", query, 0)
+	if err != nil {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Search failed: %s", b.sanitizeTelegramErr(err)), nil, replyToID)
+		return
+	}
+	if len(items) == 0 {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("No results found for %q.", query), nil, replyToID)
+		return
+	}
+	var selected *apputils.SearchResultItem
+	for i := range items {
+		if strings.EqualFold(items[i].Type, "song") {
+			selected = &items[i]
+			break
+		}
+	}
+	if selected == nil {
+		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("No song result found for %q.", query), nil, replyToID)
+		return
+	}
+	setSearchMeta(selected.ID, selected.Name, selected.Artist)
+	b.queueDownloadSongWithStorefront(chatID, selected.ID, Config.Storefront, replyToID)
 }
 
 func (b *TelegramBot) fetchSearchPage(kind string, query string, offset int) ([]apputils.SearchResultItem, bool, error) {
@@ -9417,6 +9453,7 @@ func botHelpText() string {
 
 【下载与导出】
 /u <链接> 下载（支持歌曲/专辑/歌单/艺人/MV）
+/dg <歌名或 歌手 - 歌名> 点歌（直接下载第一个匹配歌曲，无需选择）
 /rf <链接> 强制重新下载（清缓存重传，文件损坏时用）
 /ap <艺人链接> 导出艺人主页图 + 专辑封面合集
 /cv <链接> 只下载封面
@@ -9453,6 +9490,7 @@ func (b *TelegramBot) botHelpTextForChat(chatID int64, userID int64) string {
 
 【Download & Export】
 /u <link> Download (song/album/playlist/artist/MV)
+/dg <song or artist - song> Request a song (auto-download the top match, no selection)
 /rf <link> Force re-download (clear cache; use when files are corrupted)
 /ap <artist link> Export artist image + album cover set
 /cv <link> Download cover only

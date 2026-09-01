@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -212,22 +211,6 @@ func (g *telegramResourceGuard) evaluate() {
 	}
 
 	g.set(false, "")
-}
-
-func diskFreeBytes(path string) (int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	target := path
-	if !info.IsDir() {
-		target = filepath.Dir(path)
-	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(target, &stat); err != nil {
-		return 0, err
-	}
-	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
 func currentProcessMemoryBytes() uint64 {

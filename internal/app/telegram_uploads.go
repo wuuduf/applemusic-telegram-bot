@@ -631,6 +631,18 @@ func (b *TelegramBot) sendDocumentFile(chatID int64, filePath string, displayNam
 	return b.sendDocumentFileWithContext(b.operationContext(), chatID, filePath, displayName, replyToID, status, cacheKey)
 }
 
+// zipSendFailureNeedsFallback 判断 ZIP 上传失败是否应降级为 one-by-one 传输。
+// 除了超过 TG 大小上限外，上传卡死（stalled, no progress）也应降级，
+// 避免整张已下载的专辑因 ZIP 发送失败而整批丢失、只能靠配额清理后重下。
+func zipSendFailureNeedsFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "zip exceeds telegram limit") ||
+		strings.Contains(lower, "upload stalled")
+}
+
 func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID int64, filePath string, displayName string, replyToID int, status *DownloadStatus, cacheKey string) error {
 	if displayName == "" {
 		displayName = filepath.Base(filePath)

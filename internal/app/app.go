@@ -5195,9 +5195,9 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 		sanitized := sanitizeTelegramError(err, b.token)
 		fmt.Printf("send artist LP ZIP error (album:%s): %s\n", albumID, sanitized)
 		appendRuntimeErrorLogf("send artist LP ZIP error (album:%s): %s", albumID, sanitized)
-		if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
+		if zipSendFailureNeedsFallback(err) {
 			if status != nil {
-				status.UpdateSync("ZIP exceeds Telegram limit, fallback to one-by-one transfer.", 0, 0)
+				status.UpdateSync("ZIP exceeds Telegram limit or upload stalled, fallback to one-by-one transfer.", 0, 0)
 			}
 			return b.sendPreparedDownloadPaths(session, chatID, replyToID, status, settings, paths, primaryCount), nil
 		}
@@ -5593,8 +5593,8 @@ func (b *TelegramBot) exportArtistAssetsWithContext(ctx context.Context, chatID 
 		} else if isContextCancellationError(err) {
 			status.UpdateSync("Canceled.", 0, 0)
 			return
-		} else if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
-			status.UpdateSync("ZIP exceeds Telegram size limit, fallback to one-by-one.", 0, 0)
+		} else if zipSendFailureNeedsFallback(err) {
+			status.UpdateSync("ZIP exceeds Telegram size limit or upload stalled, fallback to one-by-one.", 0, 0)
 			transferMode = transferModeOneByOne
 		} else {
 			status.UpdateSync(fmt.Sprintf("Failed to send ZIP: %s", b.sanitizeTelegramErr(err)), 0, 0)
@@ -5928,8 +5928,8 @@ func (b *TelegramBot) exportAlbumLyricsWithSettingsAndContext(ctx context.Contex
 		} else if isContextCancellationError(err) {
 			status.UpdateSync("Canceled.", 0, 0)
 			return
-		} else if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
-			status.UpdateSync("ZIP exceeds Telegram size limit, fallback to one-by-one.", 0, 0)
+		} else if zipSendFailureNeedsFallback(err) {
+			status.UpdateSync("ZIP exceeds Telegram size limit or upload stalled, fallback to one-by-one.", 0, 0)
 			transferMode = transferModeOneByOne
 		} else {
 			status.UpdateSync(fmt.Sprintf("Failed to send ZIP: %s", b.sanitizeTelegramErr(err)), 0, 0)
@@ -7874,9 +7874,9 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 			sanitized := sanitizeTelegramError(err, b.token)
 			fmt.Println("send ZIP error:", sanitized)
 			appendRuntimeErrorLogf("send ZIP error (%s:%s): %s", mediaType, mediaID, sanitized)
-			if strings.Contains(strings.ToLower(err.Error()), "zip exceeds telegram limit") {
+			if zipSendFailureNeedsFallback(err) {
 				fmt.Printf("telegram zip fallback chat=%d media=%s:%s reason=%s\n", chatID, mediaType, mediaID, sanitized)
-				status.UpdateSync("ZIP exceeds Telegram limit, fallback to one-by-one transfer.", 0, 0)
+				status.UpdateSync("ZIP exceeds Telegram limit or upload stalled, fallback to one-by-one transfer.", 0, 0)
 			} else {
 				taskResult = fmt.Sprintf("zip-send-failed: %s", sanitized)
 				status.UpdateSync(fmt.Sprintf("Failed to send ZIP: %s", b.sanitizeTelegramErr(err)), 0, 0)

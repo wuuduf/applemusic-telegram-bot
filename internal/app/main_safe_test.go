@@ -1021,8 +1021,9 @@ func TestBuildAdminPanelKeyboardIncludesExpectedCallbacks(t *testing.T) {
 }
 
 func TestBotHelpTextIncludesAdminCommands(t *testing.T) {
+	// 普通用户帮助文本不展示管理员命令（已收纳进 /amadmin 面板）。
 	text := botHelpText()
-	for _, want := range []string{
+	for _, notWant := range []string{
 		"/amadmin",
 		"/amwlon",
 		"/amwloff",
@@ -1031,11 +1032,20 @@ func TestBotHelpTextIncludesAdminCommands(t *testing.T) {
 		"/amban <user_id>",
 		"/amunban <user_id>",
 		"/amcachepush",
-		"/amwhoami",
 	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("expected help text to contain %q, got %q", want, text)
+		if strings.Contains(text, notWant) {
+			t.Fatalf("regular user help text should NOT contain %q, got %q", notWant, text)
 		}
+	}
+
+	// 管理员帮助文本应提示通过 /amadmin 打开面板（管理员专属入口）。
+	bot := &TelegramBot{adminUsers: map[int64]bool{9001: true}}
+	adminText := bot.botHelpTextForChat(42, 9001)
+	if !strings.Contains(adminText, "/amadmin") {
+		t.Fatalf("admin help text should contain /amadmin hint, got %q", adminText)
+	}
+	if !strings.Contains(adminText, botHelpText()) {
+		t.Fatalf("admin help text should include the regular user help text, got %q", adminText)
 	}
 }
 

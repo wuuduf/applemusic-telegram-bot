@@ -92,6 +92,10 @@ type ConfigSet struct {
 	TelegramCmdMaxRetries     int `yaml:"telegram-cmd-max-retries"`
 	TelegramCmdRetryBackoffMS int `yaml:"telegram-cmd-retry-backoff-ms"`
 
+	// Max Telegram update handlers running at once across chats (updates from
+	// the same chat stay in order).
+	TelegramUpdateConcurrency int `yaml:"telegram-update-concurrency"`
+
 	// Optional bearer token protecting the metrics/health HTTP endpoints.
 	TelegramMetricsAuthToken string `yaml:"telegram-metrics-auth-token"`
 }

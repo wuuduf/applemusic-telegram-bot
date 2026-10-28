@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 - Docker image now builds with Go 1.25.13 (matching CI) to pick up the stdlib fixes govulncheck flagged.
 
 ### Performance
+- Telegram updates are now handled concurrently across chats (updates from the same chat stay in order), so a slow search or Apple Music API call in one chat no longer stalls every other user. Configurable via `telegram-update-concurrency` (default 8, `1` restores fully serial handling).
 - ZIP transfers store already-compressed media (m4a/flac/mp4/jpg/…) instead of deflating it, cutting CPU time for album/playlist ZIPs at virtually no size cost.
 
 - Telegram bot support for Apple Music URL types: song, album, playlist, artist, station, music-video.

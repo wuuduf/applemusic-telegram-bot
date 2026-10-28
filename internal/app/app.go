@@ -2948,6 +2948,13 @@ func (b *TelegramBot) loop() {
 	offset := b.consumePendingUpdatesOnStart()
 	lastConflictHint := time.Time{}
 	consecutiveErrors := 0
+	dispatcher := newUpdateDispatcher(b.shutdownContext(), telegramUpdateConcurrency(), b.dispatchUpdateSafely)
+	defer func() {
+		if !dispatcher.Close(defaultTelegramUpdateDrainWait) {
+			fmt.Println("Telegram update handlers did not finish before shutdown deadline.")
+			appendRuntimeErrorLog("telegram update handlers did not finish before shutdown deadline")
+		}
+	}()
 	for {
 		if b.isShuttingDown() {
 			return
@@ -2989,7 +2996,7 @@ func (b *TelegramBot) loop() {
 			if upd.UpdateID >= offset {
 				offset = upd.UpdateID + 1
 			}
-			b.dispatchUpdateSafely(upd)
+			dispatcher.Submit(upd)
 		}
 	}
 }

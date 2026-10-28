@@ -1885,6 +1885,9 @@ type TelegramBot struct {
 	inflightDownloads map[string]struct{}
 	sendLimiter       *telegramSendLimiter
 
+	userLimiter *userRateLimiter
+	history     *downloadHistory
+
 	requestStateMu sync.Mutex
 	activeRequests map[string]telegramPersistedRequest
 	requestSeq     atomic.Uint64
@@ -2294,6 +2297,9 @@ func runTelegramBot(appleToken string) {
 		bot.stopMetricsReporter()
 		bot.stopCacheSaver()
 		bot.stopStateSaver()
+		if bot.history != nil {
+			bot.history.Flush()
+		}
 		bot.clearAllAutoDeleteMessages()
 
 		switch reason {
@@ -2470,10 +2476,33 @@ func sanitizeTelegramError(err error, token string) string {
 }
 
 func sanitizeTelegramText(text string, token string) string {
-	if token == "" || text == "" {
+	if text == "" {
 		return text
 	}
-	return strings.ReplaceAll(text, token, "<redacted-token>")
+	if token != "" {
+		text = strings.ReplaceAll(text, token, "<redacted-token>")
+	}
+	return redactAppleSecrets(text)
+}
+
+// redactAppleSecrets masks Apple Music credentials (media-user-token /
+// authorization-token) if they ever appear in logged text, as defense in
+// depth. These tokens normally travel only in request headers and are not
+// logged, but this guarantees they never leak through an unexpected error path.
+func redactAppleSecrets(text string) string {
+	if text == "" {
+		return text
+	}
+	for _, secret := range []string{
+		strings.TrimSpace(Config.MediaUserToken),
+		strings.TrimSpace(Config.AuthorizationToken),
+	} {
+		// Guard against short/empty values to avoid over-redacting.
+		if len(secret) >= 8 {
+			text = strings.ReplaceAll(text, secret, "<redacted-apple-token>")
+		}
+	}
+	return text
 }
 
 func sanitizeTelegramLogValue(token string, value any) any {
@@ -2834,9 +2863,12 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		autoDeleteDeadline:      make(map[string]time.Time),
 		songCommentCache:        make(map[string]songCommentCacheEntry),
 		sendLimiter:             newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
+		userLimiter:             newUserRateLimiter(telegramRateLimitEnabled(), Config.TelegramRateLimitPerUserIntervalSec, Config.TelegramRateLimitPerUserBurst, Config.TelegramRateLimitPerUserDailyQuota),
+		history:                 newDownloadHistory(telegramHistoryEnabled(), Config.TelegramHistoryPerChatLimit, resolveTelegramHistoryFile(cacheFile, stateFile)),
 		shutdownCtx:             shutdownCtx,
 		shutdownCancel:          shutdownCancel,
 	}
+	configureExternalCommandRetries()
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.ensureBackgroundTaskControl()
 	bot.loadCache()
@@ -2865,6 +2897,43 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	bot.startMetricsHTTPServer()
 	bot.startSubscriptionWatcher()
 	return bot
+}
+
+func telegramRateLimitEnabled() bool {
+	if Config.TelegramRateLimitEnabled != nil {
+		return *Config.TelegramRateLimitEnabled
+	}
+	return true
+}
+
+func telegramHistoryEnabled() bool {
+	if Config.TelegramHistoryEnabled != nil {
+		return *Config.TelegramHistoryEnabled
+	}
+	return true
+}
+
+func resolveTelegramHistoryFile(cacheFile, stateFile string) string {
+	if raw := strings.TrimSpace(Config.TelegramHistoryFile); raw != "" {
+		return filepath.Clean(raw)
+	}
+	base := strings.TrimSpace(stateFile)
+	if base == "" {
+		base = strings.TrimSpace(cacheFile)
+	}
+	if base != "" {
+		trimmed := strings.TrimSuffix(base, filepath.Ext(base))
+		trimmed = strings.TrimSuffix(trimmed, ".state")
+		if strings.TrimSpace(trimmed) != "" {
+			return filepath.Clean(trimmed + ".history.json")
+		}
+	}
+	return downloadHistoryFileFallback
+}
+
+func configureExternalCommandRetries() {
+	backoff := time.Duration(Config.TelegramCmdRetryBackoffMS) * time.Millisecond
+	cmdrunner.ConfigureDefault(Config.TelegramCmdMaxRetries, backoff)
 }
 
 func (b *TelegramBot) loop() {
@@ -3564,6 +3633,9 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 			}
 			return
 		}
+		if isRateLimitedCommand(cmd, args) && !b.allowUserAction(msg.Chat.ID, messageUserID(msg), msg.MessageID) {
+			return
+		}
 		b.handleCommandWithContext(msg.Chat.ID, msg.Chat.Type, messageUserID(msg), cmd, args, msg.MessageID, msg.ReplyToMessage)
 		return
 	}
@@ -3575,9 +3647,65 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 		_ = b.sendMessage(msg.Chat.ID, b.localizeOutgoingText(msg.Chat.ID, "Not authorized for this bot."), nil)
 		return
 	}
+	if len(extractAppleMusicURLs(text)) > 0 && !b.allowUserAction(msg.Chat.ID, messageUserID(msg), msg.MessageID) {
+		return
+	}
 	if b.handleURLTextBatch(msg.Chat.ID, msg.MessageID, text, false) == 0 {
 		return
 	}
+}
+
+// isRateLimitedCommand reports whether a command initiates expensive work
+// (a download, an asset export, or a resource-id download) and should be
+// subject to per-user rate limiting.
+func isRateLimitedCommand(cmd string, args []string) bool {
+	switch cmd {
+	case "url", "refresh", "cover", "animatedcover", "artistphoto", "lyrics",
+		"songid", "albumid", "playlistid", "stationid", "mvid", "artistid":
+		return true
+	case "id":
+		// /id with no args just reports the chat id; with args it downloads.
+		return len(args) > 0
+	}
+	return false
+}
+
+// allowUserAction enforces the per-user rate limiter. It returns true when the
+// action may proceed. When the action is throttled it notifies the user and
+// returns false. Admins are always allowed.
+func (b *TelegramBot) allowUserAction(chatID, userID int64, replyToID int) bool {
+	if b == nil || b.userLimiter == nil {
+		return true
+	}
+	if b.isAdminUser(userID) {
+		return true
+	}
+	ok, retryAfter, reason := b.userLimiter.Allow(userID)
+	if ok {
+		return true
+	}
+	msg := "Rate limit exceeded"
+	if strings.TrimSpace(reason) != "" {
+		msg = msg + ": " + reason
+	}
+	if retryAfter > 0 {
+		msg = msg + fmt.Sprintf(". Try again in %s.", formatRetryAfter(retryAfter))
+	}
+	_ = b.sendMessageWithReply(chatID, b.localizeOutgoingText(chatID, msg), nil, replyToID)
+	return false
+}
+
+func formatRetryAfter(d time.Duration) string {
+	if d < time.Second {
+		d = time.Second
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
+	}
+	return fmt.Sprintf("%dh", int(d.Round(time.Hour)/time.Hour))
 }
 
 func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
@@ -3884,6 +4012,8 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 		_ = b.sendMessageWithReply(chatID, b.formatStatusText(chatID), nil, replyToID)
 	case "queue":
 		_ = b.sendMessageWithReply(chatID, b.formatQueueText(chatID), nil, replyToID)
+	case "history":
+		_ = b.sendMessageWithReply(chatID, b.formatHistoryText(chatID, args), nil, replyToID)
 	case "cancel":
 		if len(args) != 1 {
 			_ = b.sendMessageWithReply(chatID, "Usage: /cancel <request_id>", nil, replyToID)
@@ -4325,6 +4455,8 @@ func normalizeTelegramBotCommand(cmd string) string {
 		return "status"
 	case "q":
 		return "queue"
+	case "hist", "his":
+		return "history"
 	case "c":
 		return "cancel"
 	case "i":
@@ -7243,7 +7375,73 @@ func (b *TelegramBot) formatStatusText(chatID int64) string {
 		request := requests[0]
 		lines = append(lines, fmt.Sprintf("- next task: %s · %s · id=%s", strings.TrimSpace(request.State), telegramRequestTargetLabel(request), request.RequestID))
 	}
-	lines = append(lines, "Use /queue for detailed task list.")
+	if b.history != nil && b.history.enabled {
+		total, success, failed := b.history.Stats(chatID)
+		if total > 0 {
+			lines = append(lines, fmt.Sprintf("- history (this chat): total=%d success=%d failed=%d", total, success, failed))
+		}
+	}
+	lines = append(lines, "Use /queue for detailed task list, /history for recent downloads.")
+	return strings.Join(lines, "\n")
+}
+
+func historyResultLabel(entry downloadHistoryEntry) string {
+	result := strings.TrimSpace(entry.Result)
+	if result == "" {
+		if entry.Success {
+			return "success"
+		}
+		return "failed"
+	}
+	return result
+}
+
+func (b *TelegramBot) formatHistoryText(chatID int64, args []string) string {
+	if b == nil || b.history == nil || !b.history.enabled {
+		return "Download history is disabled."
+	}
+	entries := b.history.Entries(chatID)
+	if len(entries) == 0 {
+		return "No download history for this chat yet."
+	}
+	limit := 10
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(args[0])); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > len(entries) {
+		limit = len(entries)
+	}
+	total, success, failed := b.history.Stats(chatID)
+	lines := []string{fmt.Sprintf("Recent downloads (total=%d success=%d failed=%d):", total, success, failed)}
+	for i := 0; i < limit; i++ {
+		e := entries[i]
+		mark := "✓"
+		if !e.Success {
+			mark = "✗"
+		}
+		target := strings.TrimSpace(e.MediaType)
+		if id := strings.TrimSpace(e.MediaID); id != "" {
+			if target != "" {
+				target += ":" + id
+			} else {
+				target = id
+			}
+		}
+		if target == "" {
+			target = "(task)"
+		}
+		age := formatTelegramRequestAge(e.At)
+		if e.DurationMS > 0 {
+			lines = append(lines, fmt.Sprintf("%d. %s %s · %s · %s ago · took %s", i+1, mark, target, historyResultLabel(e), age, (time.Duration(e.DurationMS)*time.Millisecond).Round(time.Millisecond)))
+		} else {
+			lines = append(lines, fmt.Sprintf("%d. %s %s · %s · %s ago", i+1, mark, target, historyResultLabel(e), age))
+		}
+	}
+	if len(entries) > limit {
+		lines = append(lines, fmt.Sprintf("... and %d more (use /history <n>)", len(entries)-limit))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -7723,7 +7921,18 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 				_ = b.sendMessageWithReply(chatID, "任务异常已记录，已自动跳过当前任务。", nil, replyToID)
 			}
 		}
-		fmt.Printf("telegram task end chat=%d media=%s:%s result=%s elapsed=%s\n", chatID, mediaType, mediaID, taskResult, time.Since(startedAt).Round(time.Millisecond))
+		elapsed := time.Since(startedAt)
+		fmt.Printf("telegram task end chat=%d media=%s:%s result=%s elapsed=%s\n", chatID, mediaType, mediaID, taskResult, elapsed.Round(time.Millisecond))
+		if b.history != nil {
+			b.history.Record(chatID, downloadHistoryEntry{
+				MediaType:  mediaType,
+				MediaID:    mediaID,
+				Result:     taskResult,
+				Success:    success,
+				DurationMS: elapsed.Milliseconds(),
+				At:         time.Now(),
+			})
+		}
 	}()
 
 	settings = normalizeChatSettings(settings)
@@ -8037,7 +8246,7 @@ func createZipFromPaths(paths []string) (string, string, error) {
 			}
 		}
 		header.Name = filepath.ToSlash(relName)
-		header.Method = zip.Deflate
+		header.Method = zipMethodForPath(path)
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			return fail(err)
@@ -8065,6 +8274,22 @@ func createZipFromPaths(paths []string) (string, string, error) {
 		return "", "", fmt.Errorf("no files to zip")
 	}
 	return tmpPath, displayName, nil
+}
+
+// zipPrecompressedExts lists media formats that are already compressed;
+// deflating them burns CPU for little to no size reduction.
+var zipPrecompressedExts = map[string]bool{
+	".m4a": true, ".mp4": true, ".m4v": true, ".mov": true, ".flac": true,
+	".mp3": true, ".aac": true, ".ec3": true, ".ac3": true, ".opus": true,
+	".ogg": true, ".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
+	".gif": true, ".zip": true,
+}
+
+func zipMethodForPath(path string) uint16 {
+	if zipPrecompressedExts[strings.ToLower(filepath.Ext(path))] {
+		return zip.Store
+	}
+	return zip.Deflate
 }
 
 func chooseZipTempDir(paths []string) string {
@@ -9463,6 +9688,7 @@ func botHelpText() string {
 【我的任务】
 /status 查看全局运行状态（队列/线程）
 /queue 查看我的排队/运行任务
+/history [n] 查看我最近的下载记录
 /cancel <编号> 取消我的任务（编号用 /queue 查看）
 
 【设置】
@@ -9500,6 +9726,7 @@ func (b *TelegramBot) botHelpTextForChat(chatID int64, userID int64) string {
 【My tasks】
 /status View global status (queue/workers)
 /queue View my queued/running tasks
+/history [n] View my recent download history
 /cancel <id> Cancel one of my tasks (id from /queue)
 
 【Settings】

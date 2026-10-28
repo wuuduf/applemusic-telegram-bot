@@ -31,10 +31,14 @@ import (
 func main() {
 	manager := flag.String("manager", "127.0.0.1:8080",
 		"address of wrapper-manager gRPC server")
-	m3u8Listen := flag.String("m3u8-listen", ":20020",
-		"TCP listen address for the M3U8 (get-m3u8) shim")
-	decryptListen := flag.String("decrypt-listen", ":10020",
-		"TCP listen address for the Decrypt (decrypt-m3u8) shim")
+	m3u8Listen := flag.String("m3u8-listen", "127.0.0.1:20020",
+		"TCP listen address for the M3U8 (get-m3u8) shim; defaults to loopback. "+
+			"In container deployments pass an explicit bind address (e.g. :20020) "+
+			"and expose the port only on the internal network")
+	decryptListen := flag.String("decrypt-listen", "127.0.0.1:10020",
+		"TCP listen address for the Decrypt (decrypt-m3u8) shim; defaults to loopback. "+
+			"In container deployments pass an explicit bind address (e.g. :10020) "+
+			"and expose the port only on the internal network")
 	waitReady := flag.Duration("wait-ready", 60*time.Second,
 		"how long to wait for wrapper-manager to report Ready=true on startup; "+
 			"set to 0 to skip the readiness probe")

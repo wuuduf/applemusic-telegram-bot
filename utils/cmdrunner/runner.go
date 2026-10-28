@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strconv"
@@ -17,6 +18,8 @@ const (
 	defaultCommandTimeout = 120 * time.Second
 	minCommandTimeout     = 1 * time.Second
 	maxOutputPreviewLen   = 1024
+	defaultRetryBackoff   = 1500 * time.Millisecond
+	maxRetryAttempts      = 5
 )
 
 var ErrCommandTimeout = errors.New("command timeout")
@@ -48,6 +51,9 @@ type CommandError struct {
 	Cancelled bool
 	Output    string
 	Cause     error
+
+	// spawnFailed is set when the process could not be started at all.
+	spawnFailed bool
 }
 
 func (e *CommandError) Error() string {
@@ -90,6 +96,8 @@ func IsTimeout(err error) bool {
 
 type Runner struct {
 	defaultTimeout time.Duration
+	maxRetries     int
+	retryBackoff   time.Duration
 }
 
 var Default = New(DefaultTimeout())
@@ -98,7 +106,90 @@ func New(timeout time.Duration) *Runner {
 	if timeout <= 0 {
 		timeout = defaultCommandTimeout
 	}
-	return &Runner{defaultTimeout: timeout}
+	return &Runner{
+		defaultTimeout: timeout,
+		maxRetries:     defaultMaxRetries(),
+		retryBackoff:   defaultRetryBackoffDuration(),
+	}
+}
+
+// ConfigureDefault overrides the retry policy of the package-level Default
+// runner. It is intended to be called once at startup from configuration.
+// maxRetries is the number of ADDITIONAL attempts after the first (0 disables
+// retries); it is clamped to [0, maxRetryAttempts].
+func ConfigureDefault(maxRetries int, backoff time.Duration) {
+	if Default == nil {
+		Default = New(DefaultTimeout())
+	}
+	Default.SetRetryPolicy(maxRetries, backoff)
+}
+
+// SetRetryPolicy updates a runner's retry behavior.
+func (r *Runner) SetRetryPolicy(maxRetries int, backoff time.Duration) {
+	if r == nil {
+		return
+	}
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if maxRetries > maxRetryAttempts {
+		maxRetries = maxRetryAttempts
+	}
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
+	r.maxRetries = maxRetries
+	r.retryBackoff = backoff
+}
+
+func defaultMaxRetries() int {
+	if raw := strings.TrimSpace(os.Getenv("AMDL_CMD_MAX_RETRIES")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			if n > maxRetryAttempts {
+				n = maxRetryAttempts
+			}
+			return n
+		}
+	}
+	return 0
+}
+
+func defaultRetryBackoffDuration() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("AMDL_CMD_RETRY_BACKOFF_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultRetryBackoff
+}
+
+// isRetryable reports whether a failed command may be worth retrying. Only
+// transient conditions qualify: a timeout, or a spawn failure (the process
+// never started) other than a missing or non-executable binary. A non-zero
+// exit, including death by signal, is treated as a deterministic result
+// (e.g. unavailable track / DRM error) and is NOT retried.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce == nil {
+		return false
+	}
+	if ce.Cancelled {
+		return false
+	}
+	if ce.TimedOut {
+		return true
+	}
+	if ce.spawnFailed {
+		// A missing or non-executable binary will not fix itself on retry.
+		if errors.Is(ce.Cause, exec.ErrNotFound) || errors.Is(ce.Cause, fs.ErrNotExist) || errors.Is(ce.Cause, fs.ErrPermission) {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func DefaultTimeout() time.Duration {
@@ -137,6 +228,43 @@ func (r *Runner) RunWithOptions(ctx context.Context, name string, args []string,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	attempts := r.maxRetries + 1
+	if attempts < 1 || opts.Stdin != nil {
+		// Stdin is consumed by the first attempt and cannot be replayed.
+		attempts = 1
+	}
+	backoff := r.retryBackoff
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
+
+	var result Result
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		result, err = r.runOnce(ctx, name, args, opts)
+		if err == nil {
+			return result, nil
+		}
+		// Do not retry if the parent context is already done, if this was the
+		// last attempt, or if the failure is not transient.
+		if attempt == attempts-1 || ctx.Err() != nil || !isRetryable(err) {
+			return result, err
+		}
+		wait := time.Duration(attempt+1) * backoff
+		fmt.Printf("cmdrunner retry %d/%d for %q after transient failure: %v\n", attempt+1, attempts-1, name, err)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, err
+		case <-timer.C:
+		}
+	}
+	return result, err
+}
+
+func (r *Runner) runOnce(ctx context.Context, name string, args []string, opts RunOptions) (Result, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = r.defaultTimeout
@@ -171,10 +299,11 @@ func (r *Runner) RunWithOptions(ctx context.Context, name string, args []string,
 	if err := cmd.Start(); err != nil {
 		result.Duration = time.Since(started)
 		return result, &CommandError{
-			Name:     name,
-			Args:     append([]string{}, args...),
-			ExitCode: -1,
-			Cause:    err,
+			Name:        name,
+			Args:        append([]string{}, args...),
+			ExitCode:    -1,
+			Cause:       err,
+			spawnFailed: true,
 		}
 	}
 

@@ -147,7 +147,7 @@ func handleExistingMusicVideoStage(ctx *musicVideoDownloadContext) bool {
 }
 
 func prepareMusicVideoWorkspaceStage(ctx *musicVideoDownloadContext) error {
-	if err := os.MkdirAll(ctx.saveDir, os.ModePerm); err != nil {
+	if err := os.MkdirAll(ctx.saveDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create mv save directory: %w", err)
 	}
 	return nil

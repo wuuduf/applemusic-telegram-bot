@@ -92,6 +92,13 @@ func (s *DecryptServer) ListenAndServe(ctx context.Context) error {
 func (s *DecryptServer) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
+	// A panic while parsing an untrusted/malformed frame must not take down
+	// the whole shim process; contain it to this connection.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("decrypt %s: recovered from panic: %v", remote, rec)
+		}
+	}()
 
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()

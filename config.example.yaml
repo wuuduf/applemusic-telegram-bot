@@ -81,7 +81,20 @@ telegram-download-folder: ""      # Optional override for downloads
 telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP). Docker 推荐挂目录并设为 /app/runtime/telegram-cache.json，避免单文件 bind mount rename EBUSY
 telegram-state-file: ""           # Runtime state snapshot path (pending panels + queued/in-flight tasks). Empty -> auto (cache basename + .state.json)
 telegram-metrics-interval-sec: 60  # Periodic metrics/health log interval
-telegram-metrics-listen-addr: ""   # Optional HTTP metrics bind address, e.g. 127.0.0.1:9090 (empty = disabled)
+telegram-metrics-listen-addr: ""   # Optional HTTP metrics bind address, e.g. 127.0.0.1:9090 (empty = disabled). Bind to loopback, or set telegram-metrics-auth-token if exposed.
+telegram-metrics-auth-token: ""    # Optional bearer token protecting /metrics and /healthz. Send "Authorization: Bearer <token>" or ?token=<token>. Empty = no auth (safe only on loopback).
+# Per-user rate limiting / anti-abuse (admins are always exempt). Applies to download / asset-export commands and Apple Music URL messages.
+telegram-rate-limit-enabled: true               # Master switch (default true)
+telegram-rate-limit-per-user-interval-sec: 5    # Sustained min spacing between accepted actions per user (token refills 1 per interval)
+telegram-rate-limit-per-user-burst: 3           # Token bucket capacity: how many back-to-back actions a user may fire before throttling
+telegram-rate-limit-per-user-daily-quota: 0     # Max accepted actions per user per rolling 24h (0 = unlimited)
+# Per-chat download history (/history command).
+telegram-history-enabled: true                  # Master switch (default true)
+telegram-history-per-chat-limit: 30             # Retained entries per chat (max 200)
+telegram-history-file: ""                        # History snapshot path. Empty -> auto (cache/state basename + .history.json)
+# External command (mp4decrypt / MP4Box / ffmpeg) transient-failure retries.
+telegram-cmd-max-retries: 2                      # Additional attempts after the first on timeout/spawn failure (0 = no retry, max 5). Clean non-zero exits are NOT retried.
+telegram-cmd-retry-backoff-ms: 1500             # Base backoff between retries (grows linearly: 1x, 2x, ...)
 telegram-subscription-check-interval-sec: 1800 # Admin subscription poll interval for new artist albums
 telegram-resource-check-interval-sec: 30  # Resource guard re-check interval
 telegram-min-free-disk-mb: 512    # Minimum free space required on download roots before accepting new tasks

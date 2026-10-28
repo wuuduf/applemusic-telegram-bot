@@ -78,6 +78,13 @@ func (s *M3U8Server) ListenAndServe(ctx context.Context) error {
 func (s *M3U8Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
+	// Contain panics from malformed frames to this connection instead of
+	// crashing the shim process.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("m3u8 %s: recovered from panic: %v", remote, rec)
+		}
+	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(s.readTimeout)); err != nil {
 		log.Printf("m3u8 %s: set read deadline: %v", remote, err)

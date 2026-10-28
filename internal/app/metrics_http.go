@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +55,51 @@ func (b *TelegramBot) collectMetricsHTTPSnapshot() telegramMetricsHTTPSnapshot {
 		snapshot.ResourceBlocked, snapshot.ResourceReason = b.resourceGuard.snapshot()
 	}
 	return snapshot
+}
+
+// withMetricsAuth wraps a handler with a constant-time bearer-token check when
+// a token is configured. When no token is set the handler is returned as-is.
+func withMetricsAuth(token string, next http.HandlerFunc) http.HandlerFunc {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return next
+	}
+	expected := "Bearer " + token
+	return func(w http.ResponseWriter, r *http.Request) {
+		provided := strings.TrimSpace(r.Header.Get("Authorization"))
+		if provided == "" {
+			provided = "Bearer " + strings.TrimSpace(r.URL.Query().Get("token"))
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		// A bare ":9090" binds to all interfaces.
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (b *TelegramBot) serveMetricsHTTP(w http.ResponseWriter, _ *http.Request) {
@@ -165,9 +211,15 @@ func (b *TelegramBot) startMetricsHTTPServer() {
 		return
 	}
 
+	authToken := strings.TrimSpace(Config.TelegramMetricsAuthToken)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", b.serveMetricsHTTP)
-	mux.HandleFunc("/healthz", b.serveHealthzHTTP)
+	mux.HandleFunc("/metrics", withMetricsAuth(authToken, b.serveMetricsHTTP))
+	mux.HandleFunc("/healthz", withMetricsAuth(authToken, b.serveHealthzHTTP))
+
+	if authToken == "" && !isLoopbackListenAddr(addr) {
+		fmt.Printf("telegram metrics http WARNING: %s is not loopback and no telegram-metrics-auth-token is set; endpoints are unauthenticated\n", addr)
+		appendRuntimeErrorLogf("telegram metrics http WARNING: %s is not loopback and no auth token set; endpoints are unauthenticated", addr)
+	}
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -179,6 +231,7 @@ func (b *TelegramBot) startMetricsHTTPServer() {
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
 

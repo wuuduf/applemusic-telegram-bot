@@ -76,4 +76,22 @@ type ConfigSet struct {
 	TelegramCleanupIntervalSec           int     `yaml:"telegram-cleanup-interval-sec"`
 	TelegramCleanupScanIntervalSec       int     `yaml:"telegram-cleanup-scan-interval-sec"`
 	TelegramCleanupProtectSec            int     `yaml:"telegram-cleanup-protect-sec"`
+
+	// Per-user rate limiting / anti-abuse. Admins are always exempt.
+	TelegramRateLimitEnabled            *bool `yaml:"telegram-rate-limit-enabled"`
+	TelegramRateLimitPerUserIntervalSec int   `yaml:"telegram-rate-limit-per-user-interval-sec"`
+	TelegramRateLimitPerUserBurst       int   `yaml:"telegram-rate-limit-per-user-burst"`
+	TelegramRateLimitPerUserDailyQuota  int   `yaml:"telegram-rate-limit-per-user-daily-quota"`
+
+	// Per-chat download history.
+	TelegramHistoryEnabled      *bool  `yaml:"telegram-history-enabled"`
+	TelegramHistoryPerChatLimit int    `yaml:"telegram-history-per-chat-limit"`
+	TelegramHistoryFile         string `yaml:"telegram-history-file"`
+
+	// External command (mp4decrypt/MP4Box/ffmpeg) transient-failure retries.
+	TelegramCmdMaxRetries     int `yaml:"telegram-cmd-max-retries"`
+	TelegramCmdRetryBackoffMS int `yaml:"telegram-cmd-retry-backoff-ms"`
+
+	// Optional bearer token protecting the metrics/health HTTP endpoints.
+	TelegramMetricsAuthToken string `yaml:"telegram-metrics-auth-token"`
 }

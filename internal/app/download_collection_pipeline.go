@@ -306,7 +306,7 @@ func prepareStationWorkspaceStage(ctx *stationDownloadContext) {
 		fmt.Println(singerFolderName)
 	}
 	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, os.ModePerm)
+	_ = os.MkdirAll(ctx.singerFolder, 0o755)
 	ctx.station.SaveDir = ctx.singerFolder
 
 	ctx.playlistFolder = strings.NewReplacer(
@@ -322,7 +322,7 @@ func prepareStationWorkspaceStage(ctx *stationDownloadContext) {
 	}
 	ctx.playlistFolder = strings.TrimSpace(ctx.playlistFolder)
 	ctx.playlistPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.playlistFolder, "_"))
-	_ = os.MkdirAll(ctx.playlistPath, os.ModePerm)
+	_ = os.MkdirAll(ctx.playlistPath, 0o755)
 	ctx.station.SaveName = ctx.playlistFolder
 	fmt.Println(ctx.playlistFolder)
 
@@ -550,7 +550,7 @@ func prepareAlbumWorkspaceStage(ctx *albumDownloadContext) {
 		fmt.Println(singerFolderName)
 	}
 	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, os.ModePerm)
+	_ = os.MkdirAll(ctx.singerFolder, 0o755)
 	ctx.album.SaveDir = ctx.singerFolder
 
 	tagParts := []string{}
@@ -583,7 +583,7 @@ func prepareAlbumWorkspaceStage(ctx *albumDownloadContext) {
 	}
 	ctx.albumFolder = strings.TrimSpace(ctx.albumFolder)
 	ctx.albumFolderPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.albumFolder, "_"))
-	_ = os.MkdirAll(ctx.albumFolderPath, os.ModePerm)
+	_ = os.MkdirAll(ctx.albumFolderPath, 0o755)
 	ctx.album.SaveName = ctx.albumFolder
 	fmt.Println(ctx.albumFolder)
 
@@ -735,7 +735,7 @@ func preparePlaylistWorkspaceStage(ctx *playlistDownloadContext) {
 		fmt.Println(singerFolderName)
 	}
 	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, os.ModePerm)
+	_ = os.MkdirAll(ctx.singerFolder, 0o755)
 	ctx.playlist.SaveDir = ctx.singerFolder
 
 	tagParts := []string{}
@@ -763,7 +763,7 @@ func preparePlaylistWorkspaceStage(ctx *playlistDownloadContext) {
 	}
 	ctx.playlistFolder = strings.TrimSpace(ctx.playlistFolder)
 	ctx.playlistPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.playlistFolder, "_"))
-	_ = os.MkdirAll(ctx.playlistPath, os.ModePerm)
+	_ = os.MkdirAll(ctx.playlistPath, 0o755)
 	ctx.playlist.SaveName = ctx.playlistFolder
 	fmt.Println(ctx.playlistFolder)
 
@@ -893,7 +893,7 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 		fmt.Println(singerFolderName)
 	}
 	singerFolder := resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(singerFolder, os.ModePerm)
+	_ = os.MkdirAll(singerFolder, 0o755)
 
 	quality := ""
 	if strings.Contains(ctx.cfg.AlbumFolderFormat, "Quality") {
@@ -929,7 +929,7 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 	}
 	albumFolder = strings.TrimSpace(albumFolder)
 	albumFolderPath := filepath.Join(singerFolder, forbiddenNames.ReplaceAllString(albumFolder, "_"))
-	_ = os.MkdirAll(albumFolderPath, os.ModePerm)
+	_ = os.MkdirAll(albumFolderPath, 0o755)
 	fmt.Println(albumFolder)
 
 	if ctx.cfg.SaveArtistCover {

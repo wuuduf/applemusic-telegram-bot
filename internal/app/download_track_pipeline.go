@@ -99,7 +99,7 @@ func handleTrackMusicVideoStage(session *DownloadSession, track *task.Track, tok
 		return
 	}
 	if _, err := os.Stat(track.SaveDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(track.SaveDir, os.ModePerm); err != nil {
+		if err := os.MkdirAll(track.SaveDir, 0o755); err != nil {
 			fmt.Println("Failed to prepare MV save directory.")
 			session.Counter.Error++
 			return

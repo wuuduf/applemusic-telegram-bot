@@ -45,3 +45,32 @@ func TestCreateZipFromPathsBasic(t *testing.T) {
 		t.Fatalf("expected sub/b.txt in zip")
 	}
 }
+
+func TestCreateZipFromPathsStoresPrecompressedMedia(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	audioPath := writeSizedFileForTest(t, root, "01 Track.M4A", 64)
+	textPath := writeSizedFileForTest(t, root, "lyrics.lrc", 64)
+
+	zipPath, _, err := createZipFromPaths([]string{audioPath, textPath})
+	if err != nil {
+		t.Fatalf("create zip failed: %v", err)
+	}
+	defer os.Remove(zipPath)
+
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open zip failed: %v", err)
+	}
+	defer reader.Close()
+	methods := map[string]uint16{}
+	for _, f := range reader.File {
+		methods[f.Name] = f.Method
+	}
+	if methods["01 Track.M4A"] != zip.Store {
+		t.Fatalf("expected audio to be stored, got method %d", methods["01 Track.M4A"])
+	}
+	if methods["lyrics.lrc"] != zip.Deflate {
+		t.Fatalf("expected text to be deflated, got method %d", methods["lyrics.lrc"])
+	}
+}

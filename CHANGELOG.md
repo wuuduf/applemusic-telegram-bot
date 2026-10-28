@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Per-user rate limiting / anti-abuse: token-bucket flood protection plus an optional rolling 24h quota for download and asset-export commands (and Apple Music URL messages). Admins are exempt. Configurable via `telegram-rate-limit-enabled`, `telegram-rate-limit-per-user-interval-sec`, `telegram-rate-limit-per-user-burst`, `telegram-rate-limit-per-user-daily-quota`.
+- Per-chat download history with the new `/history [n]` command (also aliased `/hist`); recent outcomes are persisted atomically and surfaced in `/status`. Configurable via `telegram-history-enabled`, `telegram-history-per-chat-limit`, `telegram-history-file`.
+- Transient-failure retries for external tools (mp4decrypt / MP4Box / ffmpeg): timeouts and process-spawn failures are retried with linear backoff, while non-zero exits (including death by signal), missing/non-executable binaries and stdin-fed commands are not. Configurable via `telegram-cmd-max-retries` / `telegram-cmd-retry-backoff-ms` (or `AMDL_CMD_MAX_RETRIES` / `AMDL_CMD_RETRY_BACKOFF_MS`).
+- Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
+
+### Security & stability
+- Download directories are now created with `0o755` instead of world-writable `0o777`.
+- wrapper-shim decrypt/m3u8 per-connection handlers now recover from panics so a malformed frame can no longer crash the shim; the shim's TCP listeners now default to loopback (container deployments still pass explicit bind flags).
+- Metrics HTTP server gained a `WriteTimeout`.
+- Log redaction now also masks Apple `media-user-token` / `authorization-token` as defense-in-depth, in addition to the Telegram bot token.
+- Docker image now builds with Go 1.25.13 (matching CI) to pick up the stdlib fixes govulncheck flagged.
+
+### Performance
+- ZIP transfers store already-compressed media (m4a/flac/mp4/jpg/…) instead of deflating it, cutting CPU time for album/playlist ZIPs at virtually no size cost.
+
 - Telegram bot support for Apple Music URL types: song, album, playlist, artist, station, music-video.
 - New bot commands: `/playlistid`, `/stationid`, `/mvid`, `/artistid`, `/url`, expanded `/id`.
 - New Telegram command: `/chatid` (also `/sessionid`) to show current `chat_id` for whitelist setup.

@@ -92,6 +92,11 @@ type ConfigSet struct {
 	TelegramCmdMaxRetries     int `yaml:"telegram-cmd-max-retries"`
 	TelegramCmdRetryBackoffMS int `yaml:"telegram-cmd-retry-backoff-ms"`
 
+	// Persistence backend for cache/state/history: "sqlite" (default) or
+	// "json" (legacy per-file JSON). TelegramDBFile overrides the database path.
+	TelegramStorageBackend string `yaml:"telegram-storage-backend"`
+	TelegramDBFile         string `yaml:"telegram-db-file"`
+
 	// Max Telegram update handlers running at once across chats (updates from
 	// the same chat stay in order).
 	TelegramUpdateConcurrency int `yaml:"telegram-update-concurrency"`

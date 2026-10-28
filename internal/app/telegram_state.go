@@ -219,6 +219,9 @@ func (b *TelegramBot) saveRuntimeStateNow() error {
 	if err != nil {
 		return err
 	}
+	if b.store != nil {
+		return b.store.saveRuntimeState(payload)
+	}
 	return atomicWriteTelegramCacheFile(filepath.Clean(b.stateFile), payload)
 }
 
@@ -419,7 +422,17 @@ func (b *TelegramBot) restoreRuntimeState() {
 	if b == nil || strings.TrimSpace(b.stateFile) == "" {
 		return
 	}
-	state, err := loadRuntimeStateFromFile(b.stateFile)
+	var state telegramPersistedState
+	var err error
+	if b.store != nil {
+		var found bool
+		state, found, err = b.store.loadRuntimeState()
+		if err == nil && !found {
+			return
+		}
+	} else {
+		state, err = loadRuntimeStateFromFile(b.stateFile)
+	}
 	if err != nil {
 		if !os.IsNotExist(err) {
 			b.logTelegramPrintf("telegram runtime state load failed: %v\n", err)
@@ -607,10 +620,9 @@ func (b *TelegramBot) restoreRuntimeState() {
 			b.untrackRequest(request.RequestID)
 			continue
 		}
-		select {
-		case b.downloadQueue <- req:
+		if b.trySendDownloadRequest(req) {
 			recovered++
-		default:
+		} else {
 			dropped++
 			b.releaseInflightDownload(request.InflightKey)
 			b.untrackRequest(request.RequestID)

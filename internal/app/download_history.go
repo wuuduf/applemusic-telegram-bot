@@ -55,9 +55,17 @@ type downloadHistory struct {
 	lastSave    time.Time
 	saveTimer   *time.Timer
 	savePending bool
+
+	// store, when set, replaces the JSON file: each Record is written as its
+	// own row, so there is nothing to throttle or flush.
+	store *telegramStore
 }
 
 func newDownloadHistory(enabled bool, perChatCap int, filePath string) *downloadHistory {
+	return newDownloadHistoryWithStore(enabled, perChatCap, filePath, nil)
+}
+
+func newDownloadHistoryWithStore(enabled bool, perChatCap int, filePath string, store *telegramStore) *downloadHistory {
 	if perChatCap <= 0 {
 		perChatCap = defaultHistoryPerChatLimit
 	}
@@ -71,9 +79,25 @@ func newDownloadHistory(enabled bool, perChatCap int, filePath string) *download
 		maxChats:   2000,
 		clock:      time.Now,
 		byChat:     make(map[int64][]downloadHistoryEntry),
+		store:      store,
 	}
-	h.load()
+	if store != nil {
+		h.loadFromStore()
+	} else {
+		h.load()
+	}
 	return h
+}
+
+func (h *downloadHistory) loadFromStore() {
+	loaded, err := h.store.loadHistory(h.perChatCap)
+	if err != nil {
+		fmt.Println("download history load error:", err)
+		return
+	}
+	h.mu.Lock()
+	h.byChat = loaded
+	h.mu.Unlock()
 }
 
 func (h *downloadHistory) now() time.Time {
@@ -100,7 +124,19 @@ func (h *downloadHistory) Record(chatID int64, entry downloadHistoryEntry) {
 	trimmed := make([]downloadHistoryEntry, len(list))
 	copy(trimmed, list)
 	h.byChat[chatID] = trimmed
-	h.evictIdleChatsLocked()
+	evicted := h.evictIdleChatsLocked()
+	if h.store != nil {
+		h.mu.Unlock()
+		h.persistMu.Lock()
+		defer h.persistMu.Unlock()
+		if err := h.store.appendHistory(chatID, entry, h.perChatCap); err != nil {
+			fmt.Println("download history write error:", err)
+		}
+		if err := h.store.deleteHistoryChats(evicted); err != nil {
+			fmt.Println("download history evict error:", err)
+		}
+		return
+	}
 	sinceSave := h.now().Sub(h.lastSave)
 	if sinceSave < historyMinSaveInterval {
 		// Throttled: schedule one trailing write so this entry still reaches
@@ -154,7 +190,7 @@ func (h *downloadHistory) Stats(chatID int64) (total, success, failed int) {
 
 // Flush forces a synchronous persist of the current state (best effort).
 func (h *downloadHistory) Flush() {
-	if h == nil || !h.enabled {
+	if h == nil || !h.enabled || h.store != nil {
 		return
 	}
 	h.persistMu.Lock()
@@ -171,9 +207,11 @@ func (h *downloadHistory) Flush() {
 	h.persist(snapshot)
 }
 
-func (h *downloadHistory) evictIdleChatsLocked() {
+// evictIdleChatsLocked drops the least recently active chats beyond maxChats
+// and returns their IDs.
+func (h *downloadHistory) evictIdleChatsLocked() []int64 {
 	if len(h.byChat) <= h.maxChats {
-		return
+		return nil
 	}
 	type chatAge struct {
 		id   int64
@@ -188,9 +226,12 @@ func (h *downloadHistory) evictIdleChatsLocked() {
 		ages = append(ages, chatAge{id: id, last: last})
 	}
 	sort.Slice(ages, func(i, j int) bool { return ages[i].last.Before(ages[j].last) })
+	var evicted []int64
 	for i := 0; i < len(ages) && len(h.byChat) > h.maxChats; i++ {
 		delete(h.byChat, ages[i].id)
+		evicted = append(evicted, ages[i].id)
 	}
+	return evicted
 }
 
 func (h *downloadHistory) snapshotLocked() downloadHistoryFile {

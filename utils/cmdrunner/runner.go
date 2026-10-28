@@ -1,7 +1,6 @@
 package cmdrunner
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,8 +17,11 @@ const (
 	defaultCommandTimeout = 120 * time.Second
 	minCommandTimeout     = 1 * time.Second
 	maxOutputPreviewLen   = 1024
-	defaultRetryBackoff   = 1500 * time.Millisecond
-	maxRetryAttempts      = 5
+	// maxCapturedOutput bounds how much of each stream is kept in memory. The
+	// tail is kept because tools like ffmpeg print the actual error last.
+	maxCapturedOutput   = 256 * 1024
+	defaultRetryBackoff = 1500 * time.Millisecond
+	maxRetryAttempts    = 5
 )
 
 var ErrCommandTimeout = errors.New("command timeout")
@@ -285,10 +287,10 @@ func (r *Runner) runOnce(ctx context.Context, name string, args []string, opts R
 	}
 	cmd.Stdin = opts.Stdin
 
-	var stdoutBuf bytes.Buffer
-	var stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutBuf := &tailBuffer{limit: maxCapturedOutput}
+	stderrBuf := &tailBuffer{limit: maxCapturedOutput}
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	started := time.Now()
 	result := Result{
@@ -346,6 +348,35 @@ func (r *Runner) runOnce(ctx context.Context, name string, args []string, opts R
 		}
 	}
 	return result, nil
+}
+
+// tailBuffer is an io.Writer that keeps only the last limit bytes written.
+type tailBuffer struct {
+	limit     int
+	buf       []byte
+	truncated bool
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= t.limit {
+		t.truncated = t.truncated || len(t.buf) > 0 || len(p) > t.limit
+		t.buf = append(t.buf[:0], p[len(p)-t.limit:]...)
+		return n, nil
+	}
+	if overflow := len(t.buf) + len(p) - t.limit; overflow > 0 {
+		t.truncated = true
+		t.buf = append(t.buf[:0], t.buf[overflow:]...)
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+func (t *tailBuffer) String() string {
+	if t.truncated {
+		return "...(earlier output truncated)\n" + string(t.buf)
+	}
+	return string(t.buf)
 }
 
 func truncateOutput(output string) string {

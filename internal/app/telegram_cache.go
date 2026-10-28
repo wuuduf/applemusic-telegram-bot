@@ -92,33 +92,55 @@ func (b *TelegramBot) loadCache() {
 	b.cache = make(map[string]CachedAudio)
 	b.docCache = make(map[string]CachedDocument)
 	b.videoCache = make(map[string]CachedVideo)
+	if b.store != nil {
+		audio, docs, videos, err := b.store.loadCache()
+		if err != nil {
+			fmt.Printf("telegram cache load failed (%s): %v\n", b.store.path, err)
+			appendRuntimeErrorLogf("telegram cache load failed (%s): %v", b.store.path, err)
+		}
+		b.cache, b.docCache, b.videoCache = audio, docs, videos
+		return
+	}
 	target := strings.TrimSpace(b.cacheFile)
 	if target == "" {
 		return
 	}
+	audio, docs, videos, rewrite, ok := b.readLegacyCacheFile(target)
+	if !ok {
+		return
+	}
+	b.cache, b.docCache, b.videoCache = audio, docs, videos
+	if rewrite {
+		b.saveCacheLocked()
+	}
+}
+
+// readLegacyCacheFile parses a JSON cache file, upgrading older layouts. It
+// reports whether the content was upgraded and should be written back.
+func (b *TelegramBot) readLegacyCacheFile(target string) (map[string]CachedAudio, map[string]CachedDocument, map[string]CachedVideo, bool, bool) {
+	audio := make(map[string]CachedAudio)
+	docs := make(map[string]CachedDocument)
+	videos := make(map[string]CachedVideo)
 	target = filepath.Clean(target)
 	if err := ensureNonSymlinkRegularFile(target); err != nil {
-		return
+		return audio, docs, videos, false, false
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
-		return
+		return audio, docs, videos, false, false
 	}
 	var payload telegramCacheFile
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return
+		return audio, docs, videos, false, false
 	}
 	if payload.Documents != nil {
-		b.docCache = payload.Documents
+		docs = payload.Documents
 	}
 	if payload.Videos != nil {
-		b.videoCache = payload.Videos
+		videos = payload.Videos
 	}
 	if payload.Items == nil {
-		if payload.Version > 0 && payload.Version < 4 {
-			b.saveCacheLocked()
-		}
-		return
+		return audio, docs, videos, payload.Version > 0 && payload.Version < 4, true
 	}
 	if payload.Version < 2 {
 		migrated := make(map[string]CachedAudio)
@@ -154,12 +176,10 @@ func (b *TelegramBot) loadCache() {
 				migrated[b.cacheKey(trackID, format, entry.Compressed)] = entry
 			}
 		}
-		b.cache = migrated
-		b.saveCacheLocked()
-		return
+		return migrated, docs, videos, true, true
 	}
-	b.cache = payload.Items
-	for key, entry := range b.cache {
+	audio = payload.Items
+	for key, entry := range audio {
 		if entry.Format == "" {
 			parts := strings.Split(key, "|")
 			if len(parts) >= 2 {
@@ -168,23 +188,86 @@ func (b *TelegramBot) loadCache() {
 			if entry.Format == "" {
 				entry.Format = defaultTelegramFormat
 			}
-			b.cache[key] = entry
+			audio[key] = entry
 		}
 	}
-	if payload.Version < 4 {
-		b.saveCacheLocked()
-	}
+	return audio, docs, videos, payload.Version < 4, true
 }
 
 // saveCacheLocked writes the cache synchronously. The caller must hold
 // cacheMu; prefer saveCacheNow on hot paths so readers are not blocked by
 // marshalling and disk I/O.
 func (b *TelegramBot) saveCacheLocked() {
+	if b.store != nil {
+		changes := b.takeCacheChangesLocked()
+		b.cacheWriteMu.Lock()
+		err := b.store.applyCacheChanges(changes)
+		b.cacheWriteMu.Unlock()
+		if err != nil {
+			b.restoreCacheChangesLocked(changes)
+			b.logCacheStoreError(err)
+		}
+		return
+	}
 	if strings.TrimSpace(b.cacheFile) == "" {
 		return
 	}
 	payload, seq := b.snapshotCacheLocked()
 	b.writeCacheSnapshot(payload, seq)
+}
+
+// markCacheDirtyLocked records that an entry changed. Caller holds cacheMu.
+func (b *TelegramBot) markCacheDirtyLocked(kind, key string) {
+	if b.store == nil {
+		return
+	}
+	if b.cacheDirty == nil {
+		b.cacheDirty = make(map[cacheEntryRef]struct{})
+	}
+	b.cacheDirty[cacheEntryRef{kind: kind, key: key}] = struct{}{}
+}
+
+// takeCacheChangesLocked drains the dirty set into writes carrying each
+// entry's current value (nil when it was deleted). Caller holds cacheMu.
+func (b *TelegramBot) takeCacheChangesLocked() []cacheChange {
+	if len(b.cacheDirty) == 0 {
+		return nil
+	}
+	changes := make([]cacheChange, 0, len(b.cacheDirty))
+	for ref := range b.cacheDirty {
+		change := cacheChange{ref: ref}
+		switch ref.kind {
+		case cacheKindAudio:
+			if entry, ok := b.cache[ref.key]; ok {
+				entry.GenreNames = append([]string(nil), entry.GenreNames...)
+				change.value = entry
+			}
+		case cacheKindDocument:
+			if entry, ok := b.docCache[ref.key]; ok {
+				change.value = entry
+			}
+		case cacheKindVideo:
+			if entry, ok := b.videoCache[ref.key]; ok {
+				change.value = entry
+			}
+		}
+		changes = append(changes, change)
+	}
+	b.cacheDirty = nil
+	return changes
+}
+
+// restoreCacheChangesLocked re-marks entries whose write failed so the next
+// flush retries them. Caller holds cacheMu.
+func (b *TelegramBot) restoreCacheChangesLocked(changes []cacheChange) {
+	for _, change := range changes {
+		b.markCacheDirtyLocked(change.ref.kind, change.ref.key)
+	}
+}
+
+func (b *TelegramBot) logCacheStoreError(err error) {
+	fmt.Printf("telegram cache save failed (%s, sqlite): %v\n", b.store.path, err)
+	appendRuntimeErrorLogf("telegram cache save failed (%s, sqlite): %v", b.store.path, err)
 }
 
 // snapshotCacheLocked copies the cache for persistence. Caller holds cacheMu.
@@ -223,6 +306,21 @@ func (b *TelegramBot) writeCacheSnapshot(payload telegramCacheFile, seq uint64) 
 
 func (b *TelegramBot) saveCacheNow() {
 	if b == nil {
+		return
+	}
+	if b.store != nil {
+		b.cacheMu.Lock()
+		changes := b.takeCacheChangesLocked()
+		b.cacheMu.Unlock()
+		b.cacheWriteMu.Lock()
+		err := b.store.applyCacheChanges(changes)
+		b.cacheWriteMu.Unlock()
+		if err != nil {
+			b.cacheMu.Lock()
+			b.restoreCacheChangesLocked(changes)
+			b.cacheMu.Unlock()
+			b.logCacheStoreError(err)
+		}
 		return
 	}
 	if strings.TrimSpace(b.cacheFile) == "" {
@@ -627,6 +725,7 @@ func (b *TelegramBot) storeCachedAudio(trackID string, entry CachedAudio) {
 	}
 	entry.UpdatedAt = now
 	b.cache[cacheKey] = entry
+	b.markCacheDirtyLocked(cacheKindAudio, cacheKey)
 	b.requestCacheSave()
 }
 
@@ -639,7 +738,9 @@ func (b *TelegramBot) deleteCachedAudio(trackID, format string, compressed bool)
 	if b.cache == nil {
 		return
 	}
-	delete(b.cache, b.cacheKey(trackID, format, compressed))
+	key := b.cacheKey(trackID, format, compressed)
+	delete(b.cache, key)
+	b.markCacheDirtyLocked(cacheKindAudio, key)
 	b.requestCacheSave()
 }
 
@@ -654,6 +755,7 @@ func (b *TelegramBot) storeCachedDocument(key string, entry CachedDocument) {
 	}
 	entry.UpdatedAt = time.Now()
 	b.docCache[key] = entry
+	b.markCacheDirtyLocked(cacheKindDocument, key)
 	b.requestCacheSave()
 }
 
@@ -680,6 +782,7 @@ func (b *TelegramBot) deleteCachedDocument(key string) {
 		return
 	}
 	delete(b.docCache, key)
+	b.markCacheDirtyLocked(cacheKindDocument, key)
 	b.requestCacheSave()
 }
 
@@ -694,6 +797,7 @@ func (b *TelegramBot) storeCachedVideo(key string, entry CachedVideo) {
 	}
 	entry.UpdatedAt = time.Now()
 	b.videoCache[key] = entry
+	b.markCacheDirtyLocked(cacheKindVideo, key)
 	b.requestCacheSave()
 }
 
@@ -720,10 +824,11 @@ func (b *TelegramBot) deleteCachedVideo(key string) {
 		return
 	}
 	delete(b.videoCache, key)
+	b.markCacheDirtyLocked(cacheKindVideo, key)
 	b.requestCacheSave()
 }
 
-func deleteCacheEntriesWithPrefix[T any](items map[string]T, prefix string) int {
+func deleteCacheEntriesWithPrefix[T any](items map[string]T, prefix string, onDelete func(key string)) int {
 	if len(items) == 0 || strings.TrimSpace(prefix) == "" {
 		return 0
 	}
@@ -731,6 +836,9 @@ func deleteCacheEntriesWithPrefix[T any](items map[string]T, prefix string) int 
 	for key := range items {
 		if strings.HasPrefix(key, prefix) {
 			delete(items, key)
+			if onDelete != nil {
+				onDelete(key)
+			}
 			removed++
 		}
 	}
@@ -750,17 +858,20 @@ func (b *TelegramBot) purgeTargetCaches(target *AppleURLTarget) int {
 	b.cacheMu.Lock()
 	defer b.cacheMu.Unlock()
 
+	markAudio := func(key string) { b.markCacheDirtyLocked(cacheKindAudio, key) }
+	markDocument := func(key string) { b.markCacheDirtyLocked(cacheKindDocument, key) }
+	markVideo := func(key string) { b.markCacheDirtyLocked(cacheKindVideo, key) }
 	removed := 0
 	switch mediaType {
 	case mediaTypeSong:
-		removed += deleteCacheEntriesWithPrefix(b.cache, mediaID+"|")
-		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaTypeSong+":"+mediaID+"|")
+		removed += deleteCacheEntriesWithPrefix(b.cache, mediaID+"|", markAudio)
+		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaTypeSong+":"+mediaID+"|", markDocument)
 	case mediaTypeAlbum, mediaTypePlaylist, mediaTypeStation, mediaTypeArtistSongs:
-		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaType+":"+mediaID+"|")
+		removed += deleteCacheEntriesWithPrefix(b.docCache, mediaType+":"+mediaID+"|", markDocument)
 	case mediaTypeMusicVideo:
 		prefix := mediaTypeMusicVideo + ":" + mediaID + "|"
-		removed += deleteCacheEntriesWithPrefix(b.docCache, prefix)
-		removed += deleteCacheEntriesWithPrefix(b.videoCache, prefix)
+		removed += deleteCacheEntriesWithPrefix(b.docCache, prefix, markDocument)
+		removed += deleteCacheEntriesWithPrefix(b.videoCache, prefix, markVideo)
 	}
 	if removed > 0 {
 		b.requestCacheSave()

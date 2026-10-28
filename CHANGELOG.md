@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- SQLite persistence backend (default): the Telegram file_id cache, runtime state and download history now live in one database (`telegram.db` next to `telegram-cache-file`, override with `telegram-db-file`). Cache entries and history records are written individually instead of rewriting whole JSON files on every change. On first start, existing cache/state/history JSON files are imported and renamed to `*.migrated` as a backup; to roll back, stop the bot, rename them back and set `telegram-storage-backend: json`. Uses the pure-Go `modernc.org/sqlite` driver (no CGO; adds about 6 MB to the binary). The download cleanup never deletes the database, its `-wal`/`-shm` files, or the persistence/backup files.
 - Per-user rate limiting / anti-abuse: token-bucket flood protection plus an optional rolling 24h quota for download and asset-export commands (and Apple Music URL messages). Admins are exempt. Configurable via `telegram-rate-limit-enabled`, `telegram-rate-limit-per-user-interval-sec`, `telegram-rate-limit-per-user-burst`, `telegram-rate-limit-per-user-daily-quota`.
 - Per-chat download history with the new `/history [n]` command (also aliased `/hist`); recent outcomes are persisted atomically and surfaced in `/status`. Configurable via `telegram-history-enabled`, `telegram-history-per-chat-limit`, `telegram-history-file`.
 - Transient-failure retries for external tools (mp4decrypt / MP4Box / ffmpeg): timeouts and process-spawn failures are retried with linear backoff, while non-zero exits (including death by signal), missing/non-executable binaries and stdin-fed commands are not. Configurable via `telegram-cmd-max-retries` / `telegram-cmd-retry-backoff-ms` (or `AMDL_CMD_MAX_RETRIES` / `AMDL_CMD_RETRY_BACKOFF_MS`).
@@ -19,6 +20,9 @@ All notable changes to this project will be documented in this file.
 - wrapper-shim now checks in `go.sum`; its Docker build uses `go mod download && go mod verify` instead of resolving dependencies with `go mod tidy` at build time, builds with Go 1.25.13, and CI vets, tests and builds it (including a tidy check).
 - Apple Music catalog requests no longer fall back to `http.DefaultClient` (no timeout); they use the shared timeout-bound client.
 - Search selection metadata now expires after 24h and is capped at 5000 entries instead of growing forever in memory and in the state file.
+- Enqueuing a download during shutdown can no longer panic with "send on closed channel"; the queue is closed under the same lock used by senders.
+- External command output capture is bounded to the last 256 KiB per stream, so a chatty ffmpeg run cannot balloon memory; error messages still show the tail where the real error is.
+- The runtime Docker image no longer ships `curl` and `unzip`; the Bento4 `mp4decrypt` download now happens in a separate build stage.
 
 ### Performance
 - Cache saves snapshot under the lock and marshal/write outside it, so lookups no longer stall during disk I/O; cache and state files are written compactly, and stale snapshots can no longer overwrite newer ones. The state file now uses the same fsync'd, symlink-safe atomic writer as the cache.

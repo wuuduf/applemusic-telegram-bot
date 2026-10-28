@@ -81,6 +81,10 @@ telegram-max-file-mb: 50          # Max file size to send
 telegram-download-folder: ""      # Optional override for downloads
 telegram-cache-file: "telegram-cache.json"           # Optional cache file for Telegram file_id reuse (song audio + MV + ZIP). Docker 推荐挂目录并设为 /app/runtime/telegram-cache.json，避免单文件 bind mount rename EBUSY
 telegram-state-file: ""           # Runtime state snapshot path (pending panels + queued/in-flight tasks). Empty -> auto (cache basename + .state.json)
+telegram-storage-backend: "sqlite" # Where cache/state/history are persisted: "sqlite" (default, one database with per-entry writes) or "json" (legacy per-file JSON).
+                                   # On first start with sqlite, existing cache/state/history JSON files are imported and renamed to *.migrated (kept as backup).
+                                   # To roll back: stop the bot, rename the *.migrated files back, and set "json".
+telegram-db-file: ""              # SQLite database path. Empty -> telegram.db next to telegram-cache-file. Keep it on a local disk (not NFS/SMB).
 telegram-metrics-interval-sec: 60  # Periodic metrics/health log interval
 telegram-metrics-listen-addr: ""   # Optional HTTP metrics bind address, e.g. 127.0.0.1:9090 (empty = disabled). Bind to loopback, or set telegram-metrics-auth-token if exposed.
 telegram-metrics-auth-token: ""    # Optional bearer token protecting /metrics and /healthz. Send "Authorization: Bearer <token>" or ?token=<token>. Empty = no auth (safe only on loopback).

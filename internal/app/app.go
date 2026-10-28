@@ -1910,6 +1910,7 @@ type TelegramBot struct {
 	activeWorkers  int
 	workerWG       sync.WaitGroup
 	queueCloseOnce sync.Once
+	queueClosed    bool // guarded by queueMu; set when downloadQueue is closed
 
 	downloadCoreMu sync.Mutex
 
@@ -1926,6 +1927,12 @@ type TelegramBot struct {
 	cacheSnapSeq    uint64
 	cacheWriteMu    sync.Mutex
 	cacheWrittenSeq uint64
+
+	// store is the SQLite backend; nil means the legacy JSON files are used.
+	// cacheDirty (guarded by cacheMu) lists entries changed since the last
+	// flush so only those rows are written.
+	store      *telegramStore
+	cacheDirty map[cacheEntryRef]struct{}
 
 	inflightMu        sync.Mutex
 	inflightDownloads map[string]struct{}
@@ -2346,6 +2353,7 @@ func runTelegramBot(appleToken string) {
 		if bot.history != nil {
 			bot.history.Flush()
 		}
+		bot.closeStore()
 		bot.clearAllAutoDeleteMessages()
 
 		switch reason {
@@ -2910,11 +2918,13 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		songCommentCache:        make(map[string]songCommentCacheEntry),
 		sendLimiter:             newTelegramSendLimiter(telegramSendGlobalInterval(), telegramSendChatInterval()),
 		userLimiter:             newUserRateLimiter(telegramRateLimitEnabled(), Config.TelegramRateLimitPerUserIntervalSec, Config.TelegramRateLimitPerUserBurst, Config.TelegramRateLimitPerUserDailyQuota),
-		history:                 newDownloadHistory(telegramHistoryEnabled(), Config.TelegramHistoryPerChatLimit, resolveTelegramHistoryFile(cacheFile, stateFile)),
 		shutdownCtx:             shutdownCtx,
 		shutdownCancel:          shutdownCancel,
 	}
 	configureExternalCommandRetries()
+	historyFile := resolveTelegramHistoryFile(cacheFile, stateFile)
+	bot.openStore(historyFile)
+	bot.history = newDownloadHistoryWithStore(telegramHistoryEnabled(), Config.TelegramHistoryPerChatLimit, historyFile, bot.store)
 	bot.queueCond = sync.NewCond(&bot.queueMu)
 	bot.ensureBackgroundTaskControl()
 	bot.loadCache()
@@ -3245,9 +3255,12 @@ func (b *TelegramBot) stopDownloadWorkers() {
 		return
 	}
 	b.queueCloseOnce.Do(func() {
+		b.queueMu.Lock()
+		b.queueClosed = true
 		if b.downloadQueue != nil {
 			close(b.downloadQueue)
 		}
+		b.queueMu.Unlock()
 		// Wake workers that are blocked on queueCond.Wait so they observe
 		// the shutdown signal and exit instead of hanging until another
 		// task happens to broadcast.
@@ -7191,9 +7204,7 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 		return false
 	}
 	b.trackQueuedRequest(req)
-	select {
-	case b.downloadQueue <- req:
-	default:
+	if !b.trySendDownloadRequest(req) {
 		appRuntimeMetrics.recordQueueFullDrop()
 		b.untrackRequest(req.requestID)
 		msg := strings.TrimSpace(queueFullMessage)
@@ -7211,6 +7222,23 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 		_ = b.sendMessageWithReply(req.chatID, fmt.Sprintf("Queued. Waiting: %d, running: %d/%d", waitingRequests, activeWorkers, workerLimit), nil, req.replyToID)
 	}
 	return true
+}
+
+// trySendDownloadRequest hands req to the workers without blocking. It
+// returns false when the queue is full or already closed for shutdown; the
+// close happens under queueMu, so this never sends on a closed channel.
+func (b *TelegramBot) trySendDownloadRequest(req *downloadRequest) bool {
+	b.queueMu.Lock()
+	defer b.queueMu.Unlock()
+	if b.queueClosed || b.downloadQueue == nil {
+		return false
+	}
+	select {
+	case b.downloadQueue <- req:
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *TelegramBot) queuedRequestCount() int {
@@ -8222,13 +8250,32 @@ func telegramCleanupRootPaths() []string {
 	return sharedstorage.CleanupRootPaths(telegramCleanupRoots())
 }
 
+// telegramPersistentFiles lists the bot's own persistence files (cache, state,
+// history, SQLite database and its sidecars, plus migrated JSON backups), which
+// the download cleanup must never delete even when they live under a
+// download root.
+func telegramPersistentFiles(cacheFile string) map[string]bool {
+	protected := map[string]bool{}
+	cacheFile = strings.TrimSpace(cacheFile)
+	if cacheFile == "" {
+		return protected
+	}
+	stateFile := resolveTelegramStateFile(cacheFile)
+	paths := []string{cacheFile, stateFile, resolveTelegramHistoryFile(cacheFile, stateFile)}
+	for _, p := range append([]string(nil), paths...) {
+		paths = append(paths, p+legacyMigratedSuffix)
+	}
+	paths = append(paths, sqliteSidecarPaths(resolveTelegramDBFile(cacheFile))...)
+	for _, p := range paths {
+		protected[filepath.Clean(p)] = true
+	}
+	return protected
+}
+
 func scanDownloadFolder(root string, cacheFile string) (int64, []downloadFileEntry, error) {
 	var totalSize int64
 	entries := []downloadFileEntry{}
-	cachePath := ""
-	if cacheFile != "" {
-		cachePath = filepath.Clean(cacheFile)
-	}
+	protected := telegramPersistentFiles(cacheFile)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -8239,7 +8286,7 @@ func scanDownloadFolder(root string, cacheFile string) (int64, []downloadFileEnt
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if cachePath != "" && filepath.Clean(path) == cachePath {
+		if protected[filepath.Clean(path)] {
 			return nil
 		}
 		size := info.Size()

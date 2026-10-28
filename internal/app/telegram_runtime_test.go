@@ -1694,3 +1694,26 @@ func TestAppendRuntimeErrorLogRotatesWhenOverMaxSize(t *testing.T) {
 		t.Fatalf("current log expected to be small after rotation, got %d bytes", info.Size())
 	}
 }
+
+func TestTrySendDownloadRequestAfterStopDoesNotPanic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &TelegramBot{
+		downloadQueue:  make(chan *downloadRequest, 1),
+		workerLimit:    1,
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	if !b.trySendDownloadRequest(&downloadRequest{requestID: "before-stop"}) {
+		t.Fatalf("send before stop should succeed")
+	}
+	if b.trySendDownloadRequest(&downloadRequest{requestID: "full"}) {
+		t.Fatalf("send to a full queue should fail")
+	}
+	cancel()
+	b.stopDownloadWorkers()
+	if b.trySendDownloadRequest(&downloadRequest{requestID: "after-stop"}) {
+		t.Fatalf("send after stop should be rejected")
+	}
+}

@@ -165,3 +165,24 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 }
+
+func TestTailBufferKeepsLastBytes(t *testing.T) {
+	buf := &tailBuffer{limit: 8}
+	_, _ = buf.Write([]byte("abc"))
+	if got := buf.String(); got != "abc" {
+		t.Fatalf("short write: got %q", got)
+	}
+	_, _ = buf.Write([]byte("defghij"))
+	if got := buf.String(); !strings.HasSuffix(got, "cdefghij") || !strings.Contains(got, "truncated") {
+		t.Fatalf("overflowing write should keep the tail with a marker, got %q", got)
+	}
+	_, _ = buf.Write([]byte("0123456789"))
+	if got := buf.String(); !strings.HasSuffix(got, "23456789") {
+		t.Fatalf("oversized write should keep its last bytes, got %q", got)
+	}
+	exact := &tailBuffer{limit: 4}
+	_, _ = exact.Write([]byte("wxyz"))
+	if got := exact.String(); got != "wxyz" {
+		t.Fatalf("write of exactly limit bytes must not be marked truncated, got %q", got)
+	}
+}

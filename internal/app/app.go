@@ -33,6 +33,7 @@ import (
 	apputils "github.com/wuuduf/applemusic-telegram-bot/utils"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/cmdrunner"
+	nethttp "github.com/wuuduf/applemusic-telegram-bot/utils/nethttp"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/safe"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/structs"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/task"
@@ -62,7 +63,9 @@ var (
 	Config                  structs.ConfigSet
 	searchMetaMu            sync.Mutex
 	searchMetaByID          = make(map[string]AudioMeta)
-	networkHTTPClient       = &http.Client{Timeout: 45 * time.Second}
+	searchMetaAt            = make(map[string]time.Time)
+	searchMetaLastPrune     time.Time
+	networkHTTPClient       = nethttp.Client()
 	runtimeErrorLogMu       sync.Mutex
 	runtimeErrorLogPath     atomic.Value
 	errNoFilesDownloaded    = errors.New("no files were downloaded")
@@ -70,6 +73,15 @@ var (
 )
 
 const maxMediaIDLength = 128
+
+// Search metadata is only consumed when a selected track is downloaded, so
+// selections that never download must expire instead of piling up in memory
+// and in the persisted state file.
+const (
+	searchMetaTTL        = 24 * time.Hour
+	searchMetaMaxEntries = 5000
+	searchMetaPruneEvery = 10 * time.Minute
+)
 const maxTemplateValueBytes = 240
 
 type AudioMeta struct {
@@ -452,8 +464,36 @@ func setSearchMeta(trackID string, title string, performer string) {
 		return
 	}
 	searchMetaMu.Lock()
-	searchMetaByID[trackID] = meta
+	storeSearchMetaLocked(trackID, meta, time.Now())
 	searchMetaMu.Unlock()
+}
+
+// storeSearchMetaLocked records meta and prunes expired or excess entries.
+// Caller holds searchMetaMu.
+func storeSearchMetaLocked(trackID string, meta AudioMeta, now time.Time) {
+	searchMetaByID[trackID] = meta
+	searchMetaAt[trackID] = now
+	if len(searchMetaByID) <= searchMetaMaxEntries && now.Sub(searchMetaLastPrune) < searchMetaPruneEvery {
+		return
+	}
+	searchMetaLastPrune = now
+	for id := range searchMetaByID {
+		if now.Sub(searchMetaAt[id]) > searchMetaTTL {
+			delete(searchMetaByID, id)
+			delete(searchMetaAt, id)
+		}
+	}
+	if excess := len(searchMetaByID) - searchMetaMaxEntries; excess > 0 {
+		ids := make([]string, 0, len(searchMetaByID))
+		for id := range searchMetaByID {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return searchMetaAt[ids[i]].Before(searchMetaAt[ids[j]]) })
+		for _, id := range ids[:excess] {
+			delete(searchMetaByID, id)
+			delete(searchMetaAt, id)
+		}
+	}
 }
 
 func popSearchMeta(trackID string) (AudioMeta, bool) {
@@ -462,6 +502,7 @@ func popSearchMeta(trackID string) (AudioMeta, bool) {
 	meta, ok := searchMetaByID[trackID]
 	if ok {
 		delete(searchMetaByID, trackID)
+		delete(searchMetaAt, trackID)
 	}
 	return meta, ok
 }
@@ -1880,6 +1921,11 @@ type TelegramBot struct {
 	cacheSave  chan struct{}
 	cacheStop  chan struct{}
 	cacheWG    sync.WaitGroup
+	// cacheSnapSeq (guarded by cacheMu) numbers snapshots; cacheWriteMu
+	// serializes writes and drops snapshots older than cacheWrittenSeq.
+	cacheSnapSeq    uint64
+	cacheWriteMu    sync.Mutex
+	cacheWrittenSeq uint64
 
 	inflightMu        sync.Mutex
 	inflightDownloads map[string]struct{}

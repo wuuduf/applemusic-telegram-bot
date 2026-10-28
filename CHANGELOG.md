@@ -16,8 +16,12 @@ All notable changes to this project will be documented in this file.
 - Metrics HTTP server gained a `WriteTimeout`.
 - Log redaction now also masks Apple `media-user-token` / `authorization-token` as defense-in-depth, in addition to the Telegram bot token.
 - Docker image now builds with Go 1.25.13 (matching CI) to pick up the stdlib fixes govulncheck flagged.
+- wrapper-shim now checks in `go.sum`; its Docker build uses `go mod download && go mod verify` instead of resolving dependencies with `go mod tidy` at build time, builds with Go 1.25.13, and CI vets, tests and builds it (including a tidy check).
+- Apple Music catalog requests no longer fall back to `http.DefaultClient` (no timeout); they use the shared timeout-bound client.
+- Search selection metadata now expires after 24h and is capped at 5000 entries instead of growing forever in memory and in the state file.
 
 ### Performance
+- Cache saves snapshot under the lock and marshal/write outside it, so lookups no longer stall during disk I/O; cache and state files are written compactly, and stale snapshots can no longer overwrite newer ones. The state file now uses the same fsync'd, symlink-safe atomic writer as the cache.
 - Telegram updates are now handled concurrently across chats (updates from the same chat stay in order), so a slow search or Apple Music API call in one chat no longer stalls every other user. Configurable via `telegram-update-concurrency` (default 8, `1` restores fully serial handling).
 - ZIP transfers store already-compressed media (m4a/flac/mp4/jpg/…) instead of deflating it, cutting CPU time for album/playlist ZIPs at virtually no size cost.
 

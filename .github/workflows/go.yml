@@ -41,6 +41,31 @@ jobs:
       run: |
         go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  wrapper-shim:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: wrapper-shim
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+        cache-dependency-path: wrapper-shim/go.sum
+    - name: Verify module files are tidy
+      run: |
+        go mod tidy
+        git diff --exit-code -- go.mod go.sum
+    - name: Vet
+      run: go vet ./...
+    - name: Test
+      run: go test -race -count=1 ./...
+    - name: Build
+      run: CGO_ENABLED=0 go build -o /dev/null ./cmd/wrapper-shim
+
   build-windows:
     runs-on: windows-latest
     needs: test

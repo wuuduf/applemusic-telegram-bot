@@ -176,19 +176,38 @@ func (b *TelegramBot) loadCache() {
 	}
 }
 
+// saveCacheLocked writes the cache synchronously. The caller must hold
+// cacheMu; prefer saveCacheNow on hot paths so readers are not blocked by
+// marshalling and disk I/O.
 func (b *TelegramBot) saveCacheLocked() {
-	target := strings.TrimSpace(b.cacheFile)
-	if target == "" {
+	if strings.TrimSpace(b.cacheFile) == "" {
 		return
 	}
-	target = filepath.Clean(target)
-	payload := telegramCacheFile{
+	payload, seq := b.snapshotCacheLocked()
+	b.writeCacheSnapshot(payload, seq)
+}
+
+// snapshotCacheLocked copies the cache for persistence. Caller holds cacheMu.
+func (b *TelegramBot) snapshotCacheLocked() (telegramCacheFile, uint64) {
+	b.cacheSnapSeq++
+	return telegramCacheFile{
 		Version:   4,
 		Items:     cloneCachedAudioMap(b.cache),
 		Documents: cloneCachedDocumentMap(b.docCache),
 		Videos:    cloneCachedVideoMap(b.videoCache),
+	}, b.cacheSnapSeq
+}
+
+// writeCacheSnapshot persists a snapshot unless a newer one was already
+// written. Lock order: cacheMu (optional) before cacheWriteMu.
+func (b *TelegramBot) writeCacheSnapshot(payload telegramCacheFile, seq uint64) {
+	b.cacheWriteMu.Lock()
+	defer b.cacheWriteMu.Unlock()
+	if seq <= b.cacheWrittenSeq {
+		return
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
+	data, err := json.Marshal(payload)
 	if err != nil {
 		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", target, err)
 		appendRuntimeErrorLogf("telegram cache save failed (%s, marshal): %v", target, err)
@@ -197,16 +216,22 @@ func (b *TelegramBot) saveCacheLocked() {
 	if err := atomicWriteTelegramCacheFile(target, data); err != nil {
 		fmt.Printf("telegram cache save failed (%s, atomic write): %v\n", target, err)
 		appendRuntimeErrorLogf("telegram cache save failed (%s, atomic write): %v", target, err)
+		return
 	}
+	b.cacheWrittenSeq = seq
 }
 
 func (b *TelegramBot) saveCacheNow() {
 	if b == nil {
 		return
 	}
+	if strings.TrimSpace(b.cacheFile) == "" {
+		return
+	}
 	b.cacheMu.Lock()
-	defer b.cacheMu.Unlock()
-	b.saveCacheLocked()
+	payload, seq := b.snapshotCacheLocked()
+	b.cacheMu.Unlock()
+	b.writeCacheSnapshot(payload, seq)
 }
 
 func (b *TelegramBot) startCacheSaver() {

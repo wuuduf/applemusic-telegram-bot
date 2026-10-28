@@ -210,38 +210,16 @@ func (b *TelegramBot) saveRuntimeStateNow() error {
 	if b == nil || strings.TrimSpace(b.stateFile) == "" {
 		return nil
 	}
-	snapshot := b.buildRuntimeStateSnapshot()
-	payload, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	target := filepath.Clean(b.stateFile)
-	dir := filepath.Dir(target)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".telegram-state-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(payload); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
+	// Snapshot and write under stateMu so an older snapshot can never be
+	// renamed over a newer one.
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
-	if err := os.Rename(tmpPath, target); err != nil {
-		_ = os.Remove(tmpPath)
+	snapshot := b.buildRuntimeStateSnapshot()
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
 		return err
 	}
-	return nil
+	return atomicWriteTelegramCacheFile(filepath.Clean(b.stateFile), payload)
 }
 
 func (b *TelegramBot) buildRuntimeStateSnapshot() telegramPersistedState {
@@ -579,11 +557,13 @@ func (b *TelegramBot) restoreRuntimeState() {
 	b.accessMu.Unlock()
 
 	searchMetaMu.Lock()
+	// Persisted entries carry no timestamp; age them from load time.
+	loadedAt := time.Now()
 	for trackID, meta := range state.SearchMeta {
 		if strings.TrimSpace(trackID) == "" {
 			continue
 		}
-		searchMetaByID[trackID] = meta
+		storeSearchMetaLocked(trackID, meta, loadedAt)
 	}
 	searchMetaMu.Unlock()
 

@@ -1,17 +1,17 @@
-ARG GOVERSION=1.23
+ARG GOVERSION=1.25.13
 
 FROM --platform=$BUILDPLATFORM golang:${GOVERSION}-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
 
-COPY . .
+# Download pinned dependencies (go.sum is checked in) in their own layer so
+# source-only changes reuse the module cache.
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 
-# `go mod tidy` resolves the dependency graph the first time the image is
-# built (no go.sum is checked in). Subsequent builds reuse the module cache
-# layer Docker already has.
-RUN go mod tidy && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/wrapper-shim ./cmd/wrapper-shim
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/lyrics"
+	nethttp "github.com/wuuduf/applemusic-telegram-bot/utils/nethttp"
 )
 
 const defaultUserAgent = "Mozilla/5.0"
@@ -30,7 +31,9 @@ func (s *Service) client() *http.Client {
 	if s != nil && s.HTTPClient != nil {
 		return s.HTTPClient
 	}
-	return http.DefaultClient
+	// http.DefaultClient has no timeout; a stalled Apple request would hang
+	// the caller forever.
+	return nethttp.Client()
 }
 
 func (s *Service) userAgent() string {

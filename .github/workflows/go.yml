@@ -17,9 +17,9 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ env.GO_VERSION }}
         cache: true
@@ -33,7 +33,7 @@ jobs:
       run: |
         go test -race -count=1 ./...
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v8
+      uses: golangci/golangci-lint-action@v9
       with:
         version: ${{ env.GOLANGCI_LINT_VERSION }}
         args: --timeout=10m --enable-only=govet,ineffassign ./...
@@ -48,9 +48,9 @@ jobs:
         shell: bash
         working-directory: wrapper-shim
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ env.GO_VERSION }}
         cache: true
@@ -73,9 +73,9 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ env.GO_VERSION }}
         cache: true
@@ -91,7 +91,7 @@ jobs:
         cp README.md alac/
         cp main.exe alac/
     - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apple-music-alac-atmos-downloader-windows
         path: alac/*
@@ -103,9 +103,9 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ env.GO_VERSION }}
         cache: true
@@ -121,7 +121,7 @@ jobs:
         cp README.md alac/
         cp main alac/
     - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apple-music-alac-atmos-downloader-linux
         path: alac/*
@@ -133,9 +133,9 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ env.GO_VERSION }}
         cache: true
@@ -151,7 +151,7 @@ jobs:
         cp README.md alac/
         cp main alac/
     - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apple-music-alac-atmos-downloader-macos
         path: alac/*

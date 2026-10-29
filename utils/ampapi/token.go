@@ -2,6 +2,8 @@ package ampapi
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +16,7 @@ import (
 
 var (
 	appleMusicIndexJSRegex = regexp.MustCompile(`/assets/index~[^/]+\.js`)
-	appleMusicTokenRegex   = regexp.MustCompile(`eyJh([^"']*)`)
+	appleMusicTokenRegex   = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 )
 
 func GetToken() (string, error) {
@@ -41,7 +43,7 @@ func getTokenWithContext(ctx context.Context, force bool) (string, error) {
 		}
 	}
 
-	if !force && appleMusicTokenCache.token != "" && nowFunc().Sub(appleMusicTokenCache.fetchedAt) < tokenCacheTTL {
+	if !force && appleMusicTokenIsUnexpired(appleMusicTokenCache.token) && nowFunc().Sub(appleMusicTokenCache.fetchedAt) < tokenCacheTTL {
 		token := appleMusicTokenCache.token
 		appleMusicTokenCache.mu.Unlock()
 		return token, nil
@@ -104,10 +106,32 @@ func fetchTokenWithContext(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	token := strings.TrimSpace(appleMusicTokenRegex.FindString(string(body)))
-	if token == "" {
-		return "", errors.New("failed to extract bearer token from apple music page")
+	// JWT headers may start with alg or typ. Validate the complete payload
+	// rather than relying on one encoded header prefix or accepting redactions.
+	for _, token := range appleMusicTokenRegex.FindAllString(string(body), -1) {
+		if appleMusicTokenIsUnexpired(token) {
+			return token, nil
+		}
 	}
+	return "", errors.New("failed to extract an unexpired bearer token from apple music page")
+}
 
-	return token, nil
+// This is a freshness check, not signature verification: tokens are obtained
+// from Apple's HTTPS origin and Apple validates the signature on API requests.
+func appleMusicTokenIsUnexpired(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		ExpiresAt int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return false
+	}
+	return claims.ExpiresAt > nowFunc().Unix()
 }

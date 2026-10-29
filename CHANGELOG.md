@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- Docker CI now always builds the image (and the wrapper-shim image) and only skips the push when logging in to ghcr.io fails, failing with a clear message; pull requests get a build-only check. Previously an expired `GHCR_TOKEN` failed the job before any build, hiding whether the Dockerfile still worked.
 - `/dg` (request a song), `/motioncover` and `/lyric` now go through the per-user rate limiter like the other download commands; previously they bypassed it.
 - Download directories are now created with `0o755` instead of world-writable `0o777`.
 - wrapper-shim decrypt/m3u8 per-connection handlers now recover from panics so a malformed frame can no longer crash the shim; the shim's TCP listeners now default to loopback (container deployments still pass explicit bind flags).

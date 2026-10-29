@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -25,19 +28,54 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Login problems (e.g. an expired GHCR_TOKEN) must not hide Dockerfile
+      # problems: the image is always built, and only the push is skipped.
       - name: Log in to GitHub Container Registry
+        id: login
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build (and push when logged in) Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' && steps.login.outcome == 'success' }}
           platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Fail when the image could not be pushed
+        if: github.event_name != 'pull_request' && steps.login.outcome != 'success'
+        run: |
+          echo "::error::The image built fine, but logging in to ghcr.io failed, so nothing was pushed. GHCR_TOKEN is probably expired or missing write:packages; create a new token and update the repository secret."
+          exit 1
+
+  wrapper-shim:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wrapper-shim image
+        uses: docker/build-push-action@v6
+        with:
+          context: wrapper-shim
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=wrapper-shim
+          cache-to: type=gha,scope=wrapper-shim,mode=max

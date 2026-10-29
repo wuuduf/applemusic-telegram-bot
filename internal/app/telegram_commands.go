@@ -451,49 +451,6 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 	}
 }
 
-func normalizeTelegramBotCommand(cmd string) string {
-	switch strings.ToLower(strings.TrimSpace(cmd)) {
-	case "h":
-		return "help"
-	case "status", "stat":
-		return "status"
-	case "q":
-		return "queue"
-	case "hist", "his":
-		return "history"
-	case "c":
-		return "cancel"
-	case "i":
-		return "id"
-	case "sg":
-		return "search_song"
-	case "dg":
-		return "download_song"
-	case "sa":
-		return "search_album"
-	case "sr":
-		return "search_artist"
-	case "s":
-		return "search"
-	case "u":
-		return "url"
-	case "ap":
-		return "artistphoto"
-	case "cv":
-		return "cover"
-	case "ac":
-		return "animatedcover"
-	case "ly":
-		return "lyrics"
-	case "st":
-		return "settings"
-	case "rf":
-		return "refresh"
-	default:
-		return cmd
-	}
-}
-
 func (b *TelegramBot) handleURLTarget(chatID int64, replyToID int, target *AppleURLTarget) {
 	b.handleURLTargetWithOptions(chatID, replyToID, target, false)
 }

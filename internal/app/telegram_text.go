@@ -6,80 +6,25 @@ import (
 )
 
 func botHelpText() string {
-	return strings.TrimSpace(`
-🎵 使用说明
+	return botHelpTextForLanguage(telegramLanguageZh)
+}
 
-【搜索音乐】
-/sg <关键词> 搜索歌曲
-/sa <关键词> 搜索专辑
-/sr <关键词> 搜索艺人
-/s <song|album|artist> <关键词> 统一搜索
-
-【下载与导出】
-/u <链接> 下载（支持歌曲/专辑/歌单/艺人/MV）
-/dg <歌名或 歌手 - 歌名> 点歌（直接下载第一个匹配歌曲，无需选择）
-/rf <链接> 强制重新下载（清缓存重传，文件损坏时用）
-/ap <艺人链接> 导出艺人主页图 + 专辑封面合集
-/cv <链接> 只下载封面
-/ac <链接> 只下载动态封面
-/ly <链接> 导出歌词
-
-【我的任务】
-/status 查看全局运行状态（队列/线程）
-/queue 查看我的排队/运行任务
-/history [n] 查看我最近的下载记录
-/cancel <编号> 取消我的任务（编号用 /queue 查看）
-
-【设置】
-/st 查看或修改下载设置（音质/歌词/打包/线程等）
-
-【其他】
-/i 查看我的 chat_id
-/amwhoami 查看我的 user_id / chat_id
-
-💡 直接把 Apple Music 链接发给我就能下载，自动识别类型，一条消息可放多个链接。
-`)
+// botHelpTextForLanguage builds /help from the command registry so the list
+// can never drift from the commands the bot actually accepts.
+func botHelpTextForLanguage(lang string) string {
+	if lang == telegramLanguageEn {
+		return "🎵 How to use\n\n" + buildHelpCommandList(lang) +
+			"\n\n💡 You can also just send an Apple Music link directly — type is auto-detected, multiple links per message are supported."
+	}
+	return "🎵 使用说明\n\n" + buildHelpCommandList(telegramLanguageZh) +
+		"\n\n💡 直接把 Apple Music 链接发给我就能下载，自动识别类型，一条消息可放多个链接。"
 }
 
 func (b *TelegramBot) botHelpTextForChat(chatID int64, userID int64) string {
-	text := botHelpText()
-	if b.getChatLanguage(chatID) == telegramLanguageEn {
-		text = strings.TrimSpace(`
-🎵 How to use
-
-【Search】
-/sg <keywords> Search songs
-/sa <keywords> Search albums
-/sr <keywords> Search artists
-/s <song|album|artist> <keywords> Unified search
-
-【Download & Export】
-/u <link> Download (song/album/playlist/artist/MV)
-/dg <song or artist - song> Request a song (auto-download the top match, no selection)
-/rf <link> Force re-download (clear cache; use when files are corrupted)
-/ap <artist link> Export artist image + album cover set
-/cv <link> Download cover only
-/ac <link> Download animated cover only
-/ly <link> Export lyrics
-
-【My tasks】
-/status View global status (queue/workers)
-/queue View my queued/running tasks
-/history [n] View my recent download history
-/cancel <id> Cancel one of my tasks (id from /queue)
-
-【Settings】
-/st View or change download settings (quality/lyrics/zip/workers)
-
-【Other】
-/i Show my chat_id
-/amwhoami Show my user_id / chat_id
-
-💡 You can also just send an Apple Music link directly — type is auto-detected, multiple links per message are supported.
-`)
-	}
+	lang := b.getChatLanguage(chatID)
+	text := botHelpTextForLanguage(lang)
 	if b.isAdminUser(userID) {
-		if b.getChatLanguage(chatID) == telegramLanguageEn {
+		if lang == telegramLanguageEn {
 			text += "\n\n⚙️ Admin features: open the admin panel with /amadmin (all admin commands are listed there)."
 		} else {
 			text += "\n\n⚙️ 管理员功能：使用 /amadmin 打开管理面板（全部管理命令已收纳在面板中）。"

@@ -71,6 +71,7 @@ telegram-api-url: ""              # Optional API base URL override (default: htt
 telegram-http-timeout-sec: 180    # Telegram API request timeout for send/edit/upload calls
 telegram-poll-timeout-sec: 75     # getUpdates long-poll HTTP timeout (should be > 30)
 telegram-update-concurrency: 8    # Max messages/callbacks handled at once across chats (same chat stays in order; 1 = fully serial, max 64)
+telegram-sync-command-menu: false # On startup, publish the /help command list as the Telegram "/" menu (zh default + en). Replaces the menu set in BotFather.
 telegram-daily-restart-enabled: true # Auto restart bot runtime at local 00:00 (recommended for long-running stability)
 telegram-proxy-url: ""            # Optional explicit proxy for Telegram API, e.g. http://127.0.0.1:7890
 telegram-no-proxy: false          # If true, ignore env proxy and telegram-proxy-url (direct connect)

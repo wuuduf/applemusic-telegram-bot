@@ -111,6 +111,7 @@ go run . --help
 - `/h`：帮助
 - `/i`：查看当前 `chat_id`；也可按资源 ID 下载
 - `/sg <关键词>`：搜索歌曲
+- `/dg <歌名或 歌手 - 歌名>`：点歌，直接下载第一个匹配歌曲（无需选择面板）
 - `/sa <关键词>`：搜索专辑
 - `/sr <关键词>`：搜索艺人
 - `/s <song|album|artist> <关键词>`：统一搜索
@@ -122,6 +123,7 @@ go run . --help
 - `/ly <song|album target>`：导出歌词文件
 - `/status`：查看全局队列、Worker 和运行指标
 - `/queue`：查看当前 chat 的排队与运行任务
+- `/history [n]`：查看当前 chat 最近的下载记录（别名 `/hist`）
 - `/cancel <request_id>`：取消当前 chat 的指定任务
 - `/st [value]`：查看或修改格式、歌词、语言、ZIP、Worker、自动附件和歌曲赏析设置
 - `/amwhoami`：查看当前 `user_id / chat_id`

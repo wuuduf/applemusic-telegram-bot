@@ -123,6 +123,9 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	bot.requestStateSave()
 	bot.startMetricsHTTPServer()
 	bot.startSubscriptionWatcher()
+	if Config.TelegramSyncCommandMenu {
+		bot.launchBackgroundTask("telegram command menu sync", bot.syncTelegramCommandMenu)
+	}
 	return bot
 }
 

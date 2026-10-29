@@ -97,6 +97,10 @@ type ConfigSet struct {
 	TelegramStorageBackend string `yaml:"telegram-storage-backend"`
 	TelegramDBFile         string `yaml:"telegram-db-file"`
 
+	// Publish the /help command list as the Telegram "/" menu on startup
+	// (setMyCommands). Off by default because it replaces BotFather's menu.
+	TelegramSyncCommandMenu bool `yaml:"telegram-sync-command-menu"`
+
 	// Max Telegram update handlers running at once across chats (updates from
 	// the same chat stay in order).
 	TelegramUpdateConcurrency int `yaml:"telegram-update-concurrency"`

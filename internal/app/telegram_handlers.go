@@ -59,21 +59,6 @@ func (b *TelegramBot) handleMessage(msg *Message) {
 	}
 }
 
-// isRateLimitedCommand reports whether a command initiates expensive work
-// (a download, an asset export, or a resource-id download) and should be
-// subject to per-user rate limiting.
-func isRateLimitedCommand(cmd string, args []string) bool {
-	switch cmd {
-	case "url", "refresh", "cover", "animatedcover", "artistphoto", "lyrics",
-		"songid", "albumid", "playlistid", "stationid", "mvid", "artistid":
-		return true
-	case "id":
-		// /id with no args just reports the chat id; with args it downloads.
-		return len(args) > 0
-	}
-	return false
-}
-
 // allowUserAction enforces the per-user rate limiter. It returns true when the
 // action may proceed. When the action is throttled it notifies the user and
 // returns false. Admins are always allowed.

@@ -37,9 +37,13 @@ jobs:
       with:
         version: ${{ env.GOLANGCI_LINT_VERSION }}
         args: --timeout=10m --enable-only=govet,ineffassign ./...
+    # Pinned: govulncheck v1.8.0+ requires Go 1.26, and setup-go sets
+    # GOTOOLCHAIN=local, so @latest no longer builds on GO_VERSION. The
+    # vulnerability database is fetched live, so findings stay current.
+    # Move to @latest again once GO_VERSION is 1.26 or newer.
     - name: govulncheck
       run: |
-        go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   wrapper-shim:
     runs-on: ubuntu-latest

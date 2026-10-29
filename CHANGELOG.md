@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- Upgrade to Go 1.26.10 (go.mod `go 1.26.0`, CI, both Dockerfiles). Go 1.25 is no longer supported and govulncheck reported 10 standard-library vulnerabilities (net/http, crypto/x509, crypto/tls, net/textproto) that are fixed only in Go 1.26.9+. Also bump `golang.org/x/net` to v0.60.0 in both modules and wrapper-shim's `google.golang.org/grpc` to v1.83.1 (GO-2026-6348, GO-2026-6061). Both modules now scan clean, and CI runs govulncheck for wrapper-shim as well.
 - CI actions upgraded to their Node 24 releases (checkout v7, setup-go v7, upload-artifact v7, docker login/setup-buildx v4, build-push v7, golangci-lint-action v9, action-gh-release v3), removing the Node 20 deprecation warnings before GitHub drops Node 20. None of the removed inputs were in use.
 - Docker CI now always builds the image (and the wrapper-shim image) and only skips the push when logging in to ghcr.io fails, failing with a clear message; pull requests get a build-only check. Previously an expired `GHCR_TOKEN` failed the job before any build, hiding whether the Dockerfile still worked.
 - `/dg` (request a song), `/motioncover` and `/lyric` now go through the per-user rate limiter like the other download commands; previously they bypassed it.

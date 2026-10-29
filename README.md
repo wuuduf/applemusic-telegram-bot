@@ -37,7 +37,7 @@
 
 ### 源码运行
 
-- Go `1.25.0`，推荐使用 `go.mod` 指定的 toolchain `1.25.10`
+- Go `1.26.0`，推荐使用 `go.mod` 指定的 toolchain `1.26.10`（本地 Go 版本较低时，`go` 命令会自动下载该版本）
 - [wrapper](https://github.com/WorldObservationLog/wrapper)，或 [wrapper-manager](https://github.com/WorldObservationLog/wrapper-manager) + 本仓库的 `wrapper-shim`
 - [MP4Box / GPAC](https://gpac.io/downloads/gpac-nightly-builds/)
 - [mp4decrypt / Bento4](https://www.bento4.com/downloads/)（MV）；非 amd64 Docker 镜像会使用仓库内置 Go fallback

@@ -93,7 +93,7 @@ telegram-metrics-auth-token: ""    # Optional bearer token protecting /metrics a
 telegram-rate-limit-enabled: true               # Master switch (default true)
 telegram-rate-limit-per-user-interval-sec: 5    # Sustained min spacing between accepted actions per user (token refills 1 per interval)
 telegram-rate-limit-per-user-burst: 3           # Token bucket capacity: how many back-to-back actions a user may fire before throttling
-telegram-rate-limit-per-user-daily-quota: 0     # Max accepted actions per user per rolling 24h (0 = unlimited)
+telegram-rate-limit-per-user-daily-quota: 0     # Max accepted actions per user per rolling 24h (0 = unlimited). Users can check theirs with /quota; actions rejected only because the queue was full are refunded.
 # Per-chat download history (/history command).
 telegram-history-enabled: true                  # Master switch (default true)
 telegram-history-per-chat-limit: 30             # Retained entries per chat (max 200)

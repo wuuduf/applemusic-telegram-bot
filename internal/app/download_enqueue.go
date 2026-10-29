@@ -537,6 +537,7 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 			if strings.TrimSpace(reason) != "" {
 				msg = msg + " " + reason
 			}
+			b.noteActionQueued(req.chatID, false)
 			_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 			return false
 		}
@@ -551,6 +552,7 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 
 	if queueFull {
 		appRuntimeMetrics.recordQueueFullDrop()
+		b.noteActionQueued(req.chatID, false)
 		msg := strings.TrimSpace(queueFullMessage)
 		if msg == "" {
 			msg = "Task queue is full. Please try again later."
@@ -562,6 +564,7 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 	if !b.trySendDownloadRequest(req) {
 		appRuntimeMetrics.recordQueueFullDrop()
 		b.untrackRequest(req.requestID)
+		b.noteActionQueued(req.chatID, false)
 		msg := strings.TrimSpace(queueFullMessage)
 		if msg == "" {
 			msg = "Task queue is full. Please try again later."
@@ -569,6 +572,7 @@ func (b *TelegramBot) enqueueTaskRequest(req *downloadRequest, blockedMessage st
 		_ = b.sendMessageWithReply(req.chatID, msg, nil, req.replyToID)
 		return false
 	}
+	b.noteActionQueued(req.chatID, true)
 	waitingRequests := b.queuedRequestCount()
 	if queueLen > 0 || activeWorkers >= workerLimit {
 		if waitingRequests <= 0 {

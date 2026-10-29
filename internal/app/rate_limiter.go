@@ -152,3 +152,75 @@ func (l *userRateLimiter) projectedTokens(bucket *userBucket, now time.Time) flo
 	}
 	return tokens
 }
+
+// Refund gives back one previously accepted action, e.g. when the task it
+// started was rejected because the queue was full. It never raises the
+// bucket above its capacity or the daily count below zero.
+func (l *userRateLimiter) Refund(userID int64) {
+	if l == nil || !l.enabled || userID <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	bucket := l.buckets[userID]
+	if bucket == nil {
+		return
+	}
+	bucket.tokens++
+	if bucket.tokens > l.burst {
+		bucket.tokens = l.burst
+	}
+	if bucket.dayCount > 0 {
+		bucket.dayCount--
+	}
+}
+
+// userRateLimitStatus is a read-only view of a user's limiter state.
+type userRateLimitStatus struct {
+	Enabled      bool
+	Burst        int
+	Available    int           // actions that may be fired right now
+	NextIn       time.Duration // time until the next action refills (0 when full)
+	Interval     time.Duration
+	DailyQuota   int // 0 = unlimited
+	DailyUsed    int
+	DailyResetIn time.Duration
+}
+
+// Status reports a user's current allowance without consuming anything.
+func (l *userRateLimiter) Status(userID int64) userRateLimitStatus {
+	if l == nil || !l.enabled {
+		return userRateLimitStatus{}
+	}
+	now := l.clock()
+	status := userRateLimitStatus{
+		Enabled:    true,
+		Burst:      int(l.burst),
+		Interval:   l.interval,
+		DailyQuota: l.dailyQuota,
+		Available:  int(l.burst),
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	bucket := l.buckets[userID]
+	if bucket == nil {
+		return status
+	}
+	tokens := l.projectedTokens(bucket, now)
+	if tokens > l.burst {
+		tokens = l.burst
+	}
+	status.Available = int(tokens)
+	if tokens < l.burst {
+		frac := tokens - float64(int(tokens))
+		status.NextIn = time.Duration((1 - frac) * float64(l.interval))
+	}
+	if now.Sub(bucket.dayStart) < 24*time.Hour {
+		status.DailyUsed = bucket.dayCount
+		status.DailyResetIn = 24*time.Hour - now.Sub(bucket.dayStart)
+	}
+	if l.dailyQuota > 0 && status.DailyUsed >= l.dailyQuota {
+		status.Available = 0
+	}
+	return status
+}

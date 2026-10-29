@@ -246,7 +246,10 @@ type TelegramBot struct {
 	sendLimiter       *telegramSendLimiter
 
 	userLimiter *userRateLimiter
-	history     *downloadHistory
+
+	actionChargeMu sync.Mutex
+	actionCharges  map[int64]*actionCharge
+	history        *downloadHistory
 
 	requestStateMu sync.Mutex
 	activeRequests map[string]telegramPersistedRequest

@@ -18,6 +18,8 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 		_ = b.sendMessageWithReply(chatID, b.formatQueueText(chatID), nil, replyToID)
 	case "history":
 		_ = b.sendMessageWithReply(chatID, b.formatHistoryText(chatID, args), nil, replyToID)
+	case "quota":
+		_ = b.sendMessageWithReply(chatID, b.formatQuotaText(chatID, userID), nil, replyToID)
 	case "cancel":
 		if len(args) != 1 {
 			_ = b.sendMessageWithReply(chatID, "Usage: /cancel <request_id>", nil, replyToID)

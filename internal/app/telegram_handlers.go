@@ -9,6 +9,7 @@ import (
 )
 
 func (b *TelegramBot) handleMessage(msg *Message) {
+	defer b.finishActionCharge(msg.Chat.ID)
 	if b.maybeIngestArchiveMessage(msg) && msg.Text == "" {
 		return
 	}
@@ -71,6 +72,9 @@ func (b *TelegramBot) allowUserAction(chatID, userID int64, replyToID int) bool 
 	}
 	ok, retryAfter, reason := b.userLimiter.Allow(userID)
 	if ok {
+		if b.userLimiter.enabled && userID > 0 {
+			b.beginActionCharge(chatID, userID)
+		}
 		return true
 	}
 	msg := "Rate limit exceeded"

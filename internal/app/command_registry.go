@@ -97,6 +97,8 @@ var botCommands = []botCommand{
 		HelpZh: "查看我的排队/运行任务", HelpEn: "View my queued/running tasks"},
 	{Name: "history", Aliases: []string{"hist", "his"}, Section: helpTasks,
 		ArgsZh: "[n]", ArgsEn: "[n]", HelpZh: "查看我最近的下载记录", HelpEn: "View my recent download history"},
+	{Name: "quota", Section: helpTasks,
+		HelpZh: "查看我的下载额度（剩余次数/恢复时间）", HelpEn: "View my download allowance (remaining / refill time)"},
 	{Name: "cancel", Aliases: []string{"c"}, Section: helpTasks,
 		ArgsZh: "<编号>", ArgsEn: "<id>",
 		HelpZh: "取消我的任务（编号用 /queue 查看）", HelpEn: "Cancel one of my tasks (id from /queue)"},

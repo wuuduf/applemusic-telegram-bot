@@ -124,6 +124,7 @@ go run . --help
 - `/status`：查看全局队列、Worker 和运行指标
 - `/queue`：查看当前 chat 的排队与运行任务
 - `/history [n]`：查看当前 chat 最近的下载记录（别名 `/hist`）
+- `/quota`：查看自己的下载额度（可连续发起的次数、每日已用/上限、恢复时间）
 - `/cancel <request_id>`：取消当前 chat 的指定任务
 - `/st [value]`：查看或修改格式、歌词、语言、ZIP、Worker、自动附件和歌曲赏析设置
 - `/amwhoami`：查看当前 `user_id / chat_id`

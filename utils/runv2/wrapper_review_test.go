@@ -17,8 +17,16 @@ import (
 	"github.com/wuuduf/applemusic-telegram-bot/utils/structs"
 )
 
-func TestWrapperHTTPWatchdogInterruptsBlockedDecrypt(t *testing.T) {
-	t.Setenv(runv2IdleTimeoutEnvKey, "30")
+func TestSilentWrapperTimesOutWhileHTTPReadIsInactive(t *testing.T) {
+	exerciseSilentWrapper(t, false)
+}
+
+func TestCancellationInterruptsBlockedDecrypt(t *testing.T) {
+	exerciseSilentWrapper(t, true)
+}
+
+func exerciseSilentWrapper(t *testing.T, cancelFromCaller bool) {
+	t.Helper()
 	fixture, err := os.ReadFile("testdata/cbcs_audio.mp4")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +86,7 @@ func TestWrapperHTTPWatchdogInterruptsBlockedDecrypt(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out.m4a")
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithContext(ctx, "1", server.URL+"/playlist.m3u8", out, structs.ConfigSet{DecryptM3u8Port: listener.Addr().String()}, nil)
+		done <- runWithTimeouts(ctx, "1", server.URL+"/playlist.m3u8", out, structs.ConfigSet{DecryptM3u8Port: listener.Addr().String()}, nil, 80*time.Millisecond, 200*time.Millisecond)
 	}()
 	select {
 	case <-entered:
@@ -87,13 +95,23 @@ func TestWrapperHTTPWatchdogInterruptsBlockedDecrypt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("decrypt request never reached peer")
 	}
+	if cancelFromCaller {
+		cancel()
+	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrTimeout) {
-			t.Fatalf("expected HTTP watchdog cause, got %v", err)
+		if cancelFromCaller {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected context cancellation, got %v", err)
+			}
+		} else {
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() || errors.Is(err, ErrTimeout) {
+				t.Fatalf("expected wrapper operation timeout, got %v", err)
+			}
 		}
-	case <-time.After(34 * time.Second):
-		t.Fatal("HTTP watchdog did not interrupt blocked decrypt")
+	case <-time.After(2 * time.Second):
+		t.Fatal("wrapper did not interrupt blocked decrypt")
 	}
 	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial output not removed: %v", err)

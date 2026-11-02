@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grafov/m3u8"
@@ -42,10 +43,9 @@ const (
 var ErrTimeout = errors.New("response timed out")
 
 type TimedResponseBody struct {
-	timeout   time.Duration
-	timer     *time.Timer
-	threshold int
-	body      io.Reader
+	timeout time.Duration
+	cancel  context.CancelCauseFunc
+	body    io.Reader
 }
 
 type ProgressFunc func(phase string, done, total int64)
@@ -66,15 +66,35 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-func (b *TimedResponseBody) Read(p []byte) (int, error) {
-	n, err := b.body.Read(p)
-	if err != nil {
-		return n, err
+// watchdog bounds only an outstanding HTTP operation, never time spent
+// processing an already-read fragment. The mutex prevents a late timer callback
+// from canceling a subsequent operation after this one has completed.
+func watchdog(timeout time.Duration, cancel context.CancelCauseFunc, f func() error) error {
+	if timeout <= 0 {
+		return f()
 	}
-	// fmt.Printf("Read %d bytes, buffer size %d bytes", n, len(p))
-	if n >= b.threshold {
-		b.timer.Reset(b.timeout)
-	}
+	var mu sync.Mutex
+	active := true
+	timer := time.AfterFunc(timeout, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if active {
+			cancel(ErrTimeout)
+		}
+	})
+	err := f()
+	mu.Lock()
+	active = false
+	timer.Stop()
+	mu.Unlock()
+	return err
+}
+
+func (b *TimedResponseBody) Read(p []byte) (n int, err error) {
+	err = watchdog(b.timeout, b.cancel, func() error {
+		n, err = b.body.Read(p)
+		return err
+	})
 	return n, err
 }
 
@@ -117,11 +137,15 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 }
 
 func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc) error {
+	return runWithTimeouts(ctx, adamId, playlistUrl, outfile, Config, progress, resolveIdleTimeout(), wrapperOperationTimeout)
+}
+
+// Explicit durations allow fast tests without weakening the production minimum.
+func runWithTimeouts(ctx context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc, idleTimeout, wrapperTimeout time.Duration) error {
 	var err error
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	idleTimeout := resolveIdleTimeout()
 	header := make(http.Header)
 
 	// request media playlist
@@ -171,36 +195,21 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	}
 	req.Header = header
 
-	var body io.Reader
 	client := newRunv2StreamClient()
+	err = watchdog(idleTimeout, cancel, func() error {
+		do, err = client.Do(req)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	defer do.Body.Close()
+	if do.StatusCode != http.StatusOK {
+		return fmt.Errorf("request media stream failed: %s", do.Status)
+	}
+	var body io.Reader = do.Body
 	if idleTimeout > 0 {
-		// Idle watchdog: cancel the request only when no bytes are received for N seconds.
-		timer := time.AfterFunc(idleTimeout, func() { cancel(ErrTimeout) })
-		defer timer.Stop()
-		do, err = client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer do.Body.Close()
-		if do.StatusCode != http.StatusOK {
-			return fmt.Errorf("request media stream failed: %s", do.Status)
-		}
-		body = &TimedResponseBody{
-			timeout:   idleTimeout,
-			timer:     timer,
-			threshold: 256,
-			body:      do.Body,
-		}
-	} else {
-		do, err = client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer do.Body.Close()
-		if do.StatusCode != http.StatusOK {
-			return fmt.Errorf("request media stream failed: %s", do.Status)
-		}
-		body = do.Body
+		body = &TimedResponseBody{timeout: idleTimeout, cancel: cancel, body: do.Body}
 	}
 
 	var totalLen int64
@@ -212,7 +221,7 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	if err != nil {
 		return fmt.Errorf("connect decrypt wrapper: %w", err)
 	}
-	conn := wrapDecryptConn(runCtx, rawConn, wrapperOperationTimeout)
+	conn := wrapDecryptConn(runCtx, rawConn, wrapperTimeout)
 	//fmt.Print("Decrypting...\n")
 	success := false
 	defer func() {
@@ -223,7 +232,7 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 		}
 	}()
 
-	err = downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
+	err = downloadAndDecryptFile(runCtx, conn, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
 	if err != nil {
 		return err
 	}
@@ -232,7 +241,7 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	return nil
 }
 
-func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
+func downloadAndDecryptFile(ctx context.Context, conn io.ReadWriter, in io.Reader, outfile string,
 	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet, progress ProgressFunc, phase string) error {
 	inBuf := bufio.NewReader(in)
 	ofh, err := os.Create(outfile)
@@ -352,6 +361,11 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	}
 	err = outBuf.Flush()
 	if err != nil {
+		return err
+	}
+	// The final cancellation check is the output commit boundary: cancellation
+	// observed here removes the output; later cancellation does not revoke it.
+	if err := context.Cause(ctx); err != nil {
 		return err
 	}
 	success = true

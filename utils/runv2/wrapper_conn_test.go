@@ -129,6 +129,34 @@ func TestWrapperSequentialOperationsRenewDeadline(t *testing.T) {
 	}
 }
 
+func TestWrapperTrickleResponseHasAbsoluteReadPhaseLimit(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	conn := wrapDecryptConn(context.Background(), client, 150*time.Millisecond)
+	defer conn.Close()
+	go func() {
+		var request [1]byte
+		if _, err := io.ReadFull(server, request[:]); err != nil {
+			return
+		}
+		for i := 0; i < 16; i++ {
+			time.Sleep(30 * time.Millisecond)
+			if _, err := server.Write([]byte{byte(i)}); err != nil {
+				return
+			}
+		}
+	}()
+	if _, err := conn.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	var data [16]byte
+	n, err := io.ReadFull(conn, data[:])
+	var netErr net.Error
+	if n <= 0 || n >= len(data) || !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected absolute response timeout despite trickle, got n=%d err=%v", n, err)
+	}
+}
+
 func TestWrapperDecryptTransfer(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()

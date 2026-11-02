@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-// wrapperConn bounds each socket operation, not the lifetime of the download.
+// wrapperConn caps each Read or Write call, not the lifetime of the download.
+// This is deliberately not a byte-idle timeout: one large Write can time out
+// despite partial progress because net.Conn.Write may not return until completion.
+// The separate HTTP watchdog can also cancel runCtx while decrypt is in progress.
 // AfterFunc closes the connection on cancellation, including while an I/O is blocked.
 // Its stop function is released when the connection is closed normally.
 type wrapperConn struct {
@@ -23,35 +26,35 @@ func wrapDecryptConn(ctx context.Context, conn net.Conn, timeout time.Duration) 
 }
 
 func (c *wrapperConn) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+	if err := context.Cause(c.ctx); err != nil {
 		return 0, err
 	}
 	if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
-		if c.ctx.Err() != nil {
-			return 0, c.ctx.Err()
+		if context.Cause(c.ctx) != nil {
+			return 0, context.Cause(c.ctx)
 		}
 		return 0, err
 	}
 	n, err := c.Conn.Read(p)
-	if err != nil && c.ctx.Err() != nil {
-		return n, c.ctx.Err()
+	if err != nil && context.Cause(c.ctx) != nil {
+		return n, context.Cause(c.ctx)
 	}
 	return n, err
 }
 
 func (c *wrapperConn) Write(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+	if err := context.Cause(c.ctx); err != nil {
 		return 0, err
 	}
 	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
-		if c.ctx.Err() != nil {
-			return 0, c.ctx.Err()
+		if context.Cause(c.ctx) != nil {
+			return 0, context.Cause(c.ctx)
 		}
 		return 0, err
 	}
 	n, err := c.Conn.Write(p)
-	if err != nil && c.ctx.Err() != nil {
-		return n, c.ctx.Err()
+	if err != nil && context.Cause(c.ctx) != nil {
+		return n, context.Cause(c.ctx)
 	}
 	return n, err
 }

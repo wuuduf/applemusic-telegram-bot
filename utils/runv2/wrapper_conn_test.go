@@ -91,7 +91,7 @@ func TestWrapperCancellationInterruptsIO(t *testing.T) {
 	}
 }
 
-func TestWrapperProgressRenewsDeadline(t *testing.T) {
+func TestWrapperSequentialOperationsRenewDeadline(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 	conn := wrapDecryptConn(context.Background(), client, 200*time.Millisecond)

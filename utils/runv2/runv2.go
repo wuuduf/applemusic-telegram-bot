@@ -32,7 +32,8 @@ const (
 	runv2IdleTimeoutEnvKey   = "AMDL_RUNV2_IDLE_TIMEOUT_SEC"
 	defaultHeaderTimeoutSec  = 45
 	defaultDialTimeoutSec    = 10
-	wrapperIdleTimeout       = 300 * time.Second
+	wrapperOperationTimeout  = 300 * time.Second
+	wrapperShutdownTimeout   = 500 * time.Millisecond
 	defaultHandshakeTimeout  = 10
 	defaultIdleConnTimeout   = 90
 	defaultExpectContinueSec = 1
@@ -207,11 +208,11 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	// connect to decryptor
 	//addr := fmt.Sprintf("127.0.0.1:10020")
 	addr := Config.DecryptM3u8Port
-	rawConn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(ctx, "tcp", addr)
+	rawConn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(runCtx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("connect decrypt wrapper: %w", err)
 	}
-	conn := wrapDecryptConn(ctx, rawConn, wrapperIdleTimeout)
+	conn := wrapDecryptConn(runCtx, rawConn, wrapperOperationTimeout)
 	//fmt.Print("Decrypting...\n")
 	success := false
 	defer func() {
@@ -566,6 +567,14 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 // Reset the loops on the script's end and close the connection
 func Close(conn io.WriteCloser) error {
 	defer conn.Close()
+	if c, ok := conn.(*wrapperConn); ok {
+		// Cleanup is best effort and must not inherit the much longer I/O limit.
+		if err := c.Conn.SetWriteDeadline(time.Now().Add(wrapperShutdownTimeout)); err != nil {
+			return err
+		}
+		_, err := c.Conn.Write([]byte{0, 0, 0, 0, 0})
+		return err
+	}
 	_, err := conn.Write([]byte{0, 0, 0, 0, 0})
 	return err
 }

@@ -32,6 +32,7 @@ const (
 	runv2IdleTimeoutEnvKey   = "AMDL_RUNV2_IDLE_TIMEOUT_SEC"
 	defaultHeaderTimeoutSec  = 45
 	defaultDialTimeoutSec    = 10
+	wrapperIdleTimeout       = 300 * time.Second
 	defaultHandshakeTimeout  = 10
 	defaultIdleConnTimeout   = 90
 	defaultExpectContinueSec = 1
@@ -206,17 +207,26 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	// connect to decryptor
 	//addr := fmt.Sprintf("127.0.0.1:10020")
 	addr := Config.DecryptM3u8Port
-	conn, err := net.Dial("tcp", addr)
+	rawConn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect decrypt wrapper: %w", err)
 	}
+	conn := wrapDecryptConn(ctx, rawConn, wrapperIdleTimeout)
 	//fmt.Print("Decrypting...\n")
-	defer Close(conn)
+	success := false
+	defer func() {
+		if success {
+			_ = Close(conn)
+		} else {
+			_ = conn.Close()
+		}
+	}()
 
 	err = downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
 	if err != nil {
 		return err
 	}
+	success = true
 	fmt.Print("Decrypted\n")
 	return nil
 }
@@ -308,14 +318,21 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		key := segment.Key
 		if key != nil {
 			if i != 0 {
-				SwitchKeys(rw)
+				if err := SwitchKeys(rw); err != nil {
+					return fmt.Errorf("switch decrypt key: %w", err)
+				}
 			}
 			if key.URI == prefetchKey {
-				SendString(rw, "0")
+				err = SendString(rw, "0")
 			} else {
-				SendString(rw, adamId)
+				err = SendString(rw, adamId)
 			}
-			SendString(rw, key.URI)
+			if err != nil {
+				return fmt.Errorf("send decrypt track id: %w", err)
+			}
+			if err := SendString(rw, key.URI); err != nil {
+				return fmt.Errorf("send decrypt key: %w", err)
+			}
 		}
 		// flushes the buffer
 		err = DecryptFragment(frag, tracks, rw)

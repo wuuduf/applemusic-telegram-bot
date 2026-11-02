@@ -17,6 +17,8 @@ jobs:
           cache: true
       - name: Test candidate
         run: go test -count=1 ./...
+      - name: Race test wrapper timeout and cancellation
+        run: go test -race -count=1 ./utils/runv2
       - name: Build static Linux AMD64 candidate
         run: |
           mkdir -p dist

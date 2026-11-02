@@ -13,7 +13,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/grafov/m3u8"
@@ -33,19 +32,20 @@ const (
 	runv2IdleTimeoutEnvKey   = "AMDL_RUNV2_IDLE_TIMEOUT_SEC"
 	defaultHeaderTimeoutSec  = 45
 	defaultDialTimeoutSec    = 10
-	wrapperOperationTimeout  = 300 * time.Second
-	wrapperShutdownTimeout   = 500 * time.Millisecond
 	defaultHandshakeTimeout  = 10
 	defaultIdleConnTimeout   = 90
 	defaultExpectContinueSec = 1
+	decryptPhaseTimeout      = 5 * time.Minute
+	decryptCloseTimeout      = 500 * time.Millisecond
 )
 
 var ErrTimeout = errors.New("response timed out")
 
 type TimedResponseBody struct {
-	timeout time.Duration
-	cancel  context.CancelCauseFunc
-	body    io.Reader
+	timeout   time.Duration
+	timer     *time.Timer
+	threshold int
+	body      io.Reader
 }
 
 type ProgressFunc func(phase string, done, total int64)
@@ -66,35 +66,15 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-// watchdog bounds only an outstanding HTTP operation, never time spent
-// processing an already-read fragment. The mutex prevents a late timer callback
-// from canceling a subsequent operation after this one has completed.
-func watchdog(timeout time.Duration, cancel context.CancelCauseFunc, f func() error) error {
-	if timeout <= 0 {
-		return f()
+func (b *TimedResponseBody) Read(p []byte) (int, error) {
+	n, err := b.body.Read(p)
+	if err != nil {
+		return n, err
 	}
-	var mu sync.Mutex
-	active := true
-	timer := time.AfterFunc(timeout, func() {
-		mu.Lock()
-		defer mu.Unlock()
-		if active {
-			cancel(ErrTimeout)
-		}
-	})
-	err := f()
-	mu.Lock()
-	active = false
-	timer.Stop()
-	mu.Unlock()
-	return err
-}
-
-func (b *TimedResponseBody) Read(p []byte) (n int, err error) {
-	err = watchdog(b.timeout, b.cancel, func() error {
-		n, err = b.body.Read(p)
-		return err
-	})
+	// fmt.Printf("Read %d bytes, buffer size %d bytes", n, len(p))
+	if n >= b.threshold {
+		b.timer.Reset(b.timeout)
+	}
 	return n, err
 }
 
@@ -137,15 +117,11 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 }
 
 func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc) error {
-	return runWithTimeouts(ctx, adamId, playlistUrl, outfile, Config, progress, resolveIdleTimeout(), wrapperOperationTimeout)
-}
-
-// Explicit durations allow fast tests without weakening the production minimum.
-func runWithTimeouts(ctx context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress ProgressFunc, idleTimeout, wrapperTimeout time.Duration) error {
 	var err error
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	idleTimeout := resolveIdleTimeout()
 	header := make(http.Header)
 
 	// request media playlist
@@ -195,21 +171,36 @@ func runWithTimeouts(ctx context.Context, adamId string, playlistUrl string, out
 	}
 	req.Header = header
 
+	var body io.Reader
 	client := newRunv2StreamClient()
-	err = watchdog(idleTimeout, cancel, func() error {
-		do, err = client.Do(req)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	defer do.Body.Close()
-	if do.StatusCode != http.StatusOK {
-		return fmt.Errorf("request media stream failed: %s", do.Status)
-	}
-	var body io.Reader = do.Body
 	if idleTimeout > 0 {
-		body = &TimedResponseBody{timeout: idleTimeout, cancel: cancel, body: do.Body}
+		// Idle watchdog: cancel the request only when no bytes are received for N seconds.
+		timer := time.AfterFunc(idleTimeout, func() { cancel(ErrTimeout) })
+		defer timer.Stop()
+		do, err = client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer do.Body.Close()
+		if do.StatusCode != http.StatusOK {
+			return fmt.Errorf("request media stream failed: %s", do.Status)
+		}
+		body = &TimedResponseBody{
+			timeout:   idleTimeout,
+			timer:     timer,
+			threshold: 256,
+			body:      do.Body,
+		}
+	} else {
+		do, err = client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer do.Body.Close()
+		if do.StatusCode != http.StatusOK {
+			return fmt.Errorf("request media stream failed: %s", do.Status)
+		}
+		body = do.Body
 	}
 
 	var totalLen int64
@@ -217,26 +208,21 @@ func runWithTimeouts(ctx context.Context, adamId string, playlistUrl string, out
 	// connect to decryptor
 	//addr := fmt.Sprintf("127.0.0.1:10020")
 	addr := Config.DecryptM3u8Port
-	rawConn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(runCtx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("connect decrypt wrapper: %w", err)
-	}
-	conn := wrapDecryptConn(runCtx, rawConn, wrapperTimeout)
-	//fmt.Print("Decrypting...\n")
-	success := false
-	defer func() {
-		if success {
-			_ = Close(conn)
-		} else {
-			_ = conn.Close()
-		}
-	}()
-
-	err = downloadAndDecryptFile(runCtx, conn, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
+	conn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
-	success = true
+	// Bind only to the task context: runCtx may be canceled by the HTTP watchdog
+	// while this socket is still making healthy decryption progress.
+	decryptor := newDecryptConn(ctx, conn, decryptPhaseTimeout)
+	defer decryptor.Close()
+
+	err = downloadAndDecryptFile(ctx, decryptor, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
+	if err != nil {
+		return err
+	}
+	// Graceful marker is best-effort and independently bounded; errors skip it.
+	_ = Close(conn)
 	fmt.Print("Decrypted\n")
 	return nil
 }
@@ -328,21 +314,14 @@ func downloadAndDecryptFile(ctx context.Context, conn io.ReadWriter, in io.Reade
 		key := segment.Key
 		if key != nil {
 			if i != 0 {
-				if err := SwitchKeys(rw); err != nil {
-					return fmt.Errorf("switch decrypt key: %w", err)
-				}
+				SwitchKeys(rw)
 			}
 			if key.URI == prefetchKey {
-				err = SendString(rw, "0")
+				SendString(rw, "0")
 			} else {
-				err = SendString(rw, adamId)
+				SendString(rw, adamId)
 			}
-			if err != nil {
-				return fmt.Errorf("send decrypt track id: %w", err)
-			}
-			if err := SendString(rw, key.URI); err != nil {
-				return fmt.Errorf("send decrypt key: %w", err)
-			}
+			SendString(rw, key.URI)
 		}
 		// flushes the buffer
 		err = DecryptFragment(frag, tracks, rw)
@@ -363,9 +342,7 @@ func downloadAndDecryptFile(ctx context.Context, conn io.ReadWriter, in io.Reade
 	if err != nil {
 		return err
 	}
-	// The final cancellation check is the output commit boundary: cancellation
-	// observed here removes the output; later cancellation does not revoke it.
-	if err := context.Cause(ctx); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	success = true
@@ -581,13 +558,10 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 // Reset the loops on the script's end and close the connection
 func Close(conn io.WriteCloser) error {
 	defer conn.Close()
-	if c, ok := conn.(*wrapperConn); ok {
-		// Cleanup is best effort and must not inherit the much longer I/O limit.
-		if err := c.Conn.SetWriteDeadline(time.Now().Add(wrapperShutdownTimeout)); err != nil {
+	if c, ok := conn.(net.Conn); ok {
+		if err := c.SetWriteDeadline(time.Now().Add(decryptCloseTimeout)); err != nil {
 			return err
 		}
-		_, err := c.Conn.Write([]byte{0, 0, 0, 0, 0})
-		return err
 	}
 	_, err := conn.Write([]byte{0, 0, 0, 0, 0})
 	return err

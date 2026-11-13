@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,7 +22,7 @@ func resolveTelegramProxy() (func(*http.Request) (*url.URL, error), string) {
 	}
 	parsed, err := url.Parse(rawProxy)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		fmt.Printf("Warning: invalid telegram-proxy-url %q. Falling back to environment proxy.\n", rawProxy)
+		logWarnf("invalid telegram-proxy-url %q. Falling back to environment proxy.", rawProxy)
 		return http.ProxyFromEnvironment, "env(fallback)"
 	}
 	return http.ProxyURL(parsed), parsed.Redacted()

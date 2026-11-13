@@ -49,7 +49,7 @@ func currentRuntimeErrorLogPath() string {
 
 func appendRuntimeErrorLog(message string) {
 	path := currentRuntimeErrorLogPath()
-	message = strings.TrimSpace(message)
+	message = redactLogSecrets(strings.TrimSpace(message))
 	if path == "" || message == "" {
 		return
 	}

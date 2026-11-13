@@ -39,7 +39,6 @@ require (
 	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.59.0 // indirect
 )
 
 require (
@@ -52,4 +51,5 @@ require (
 	github.com/zhaarey/go-mp4tag v0.0.0-20251021234435-2c70f6b1bf76
 	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v2 v2.2.8
+	modernc.org/sqlite v1.59.0
 )

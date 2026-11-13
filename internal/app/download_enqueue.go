@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +71,7 @@ func (b *TelegramBot) waitTelegramSend(ctx context.Context, chatID int64) error 
 	}
 	err := b.sendLimiter.wait(ctx, chatID)
 	if err != nil {
-		b.logTelegramPrintf("telegram send wait canceled chat=%d: %v\n", chatID, err)
+		logWarnf("telegram send wait canceled chat=%d: %v", chatID, err)
 	}
 	return err
 }
@@ -108,7 +110,7 @@ func (b *TelegramBot) applyTelegramRetryAfter(duration time.Duration) {
 	if b.sendLimiter != nil {
 		b.sendLimiter.blockFor(duration)
 	}
-	fmt.Printf("telegram retry_after applied: blocking sends for %s\n", duration.Round(time.Second))
+	logInfof("telegram retry_after applied: blocking sends for %s", duration.Round(time.Second))
 	appRuntimeMetrics.recordTelegramRetryAfter()
 }
 
@@ -130,8 +132,13 @@ func (b *TelegramBot) getUpdatesBackoff(err error) (time.Duration, string) {
 	if err == nil {
 		return 0, ""
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "409") || strings.Contains(msg, "conflict") {
+	var statusErr telegramStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.code == http.StatusConflict {
+			return b.getUpdatesConflictSleep(), "conflict"
+		}
+	} else if msg := strings.ToLower(err.Error()); strings.Contains(msg, "409 conflict") || strings.Contains(msg, "terminated by other getupdates") {
+		// Errors without a status (e.g. an ok=false body) still mention it.
 		return b.getUpdatesConflictSleep(), "conflict"
 	}
 	if retryAfter, ok := parseTelegramRetryAfter(err); ok {
@@ -228,11 +235,11 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 		}
 		content, _, err := b.fetchLyricsOnly(songID, storefront, outputFormat)
 		if err != nil {
-			b.logTelegramPrintf("cached song extra lyrics skipped (%s): %v\n", songID, err)
+			logWarnf("cached song extra lyrics skipped (%s): %v", songID, err)
 		} else if strings.TrimSpace(content) != "" {
 			displayName := sanitizeFileBaseName(baseName) + ".lyrics." + outputFormat
 			if err := b.sendTextAsDocument(chatID, replyToID, displayName, outputFormat, content); err != nil {
-				b.logTelegramPrintf("send cached lyrics error (%s): %v\n", songID, err)
+				logWarnf("send cached lyrics error (%s): %v", songID, err)
 			}
 		}
 	}
@@ -247,7 +254,7 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 		Storefront: storefront,
 	})
 	if err != nil {
-		b.logTelegramPrintf("cached song extra artwork skipped (%s): %v\n", songID, err)
+		logWarnf("cached song extra artwork skipped (%s): %v", songID, err)
 		return
 	}
 	displayBase := sanitizeFileBaseName(firstNonEmpty(info.DisplayName, baseName))
@@ -255,11 +262,11 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 	if normalized.AutoCover && strings.TrimSpace(info.CoverURL) != "" {
 		coverPath, tmpDir, err := renderCoverToTemp(info.CoverURL)
 		if err != nil {
-			b.logTelegramPrintf("cached song extra cover skipped (%s): %v\n", songID, err)
+			logWarnf("cached song extra cover skipped (%s): %v", songID, err)
 		} else {
 			displayName := displayBase + "-cover" + strings.ToLower(filepath.Ext(coverPath))
 			if err := b.sendDocumentFile(chatID, coverPath, displayName, replyToID, nil, ""); err != nil {
-				b.logTelegramPrintf("send cached cover error (%s): %v\n", songID, err)
+				logWarnf("send cached cover error (%s): %v", songID, err)
 			}
 			_ = os.RemoveAll(tmpDir)
 		}
@@ -267,25 +274,25 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 
 	if normalized.AutoAnimated && strings.TrimSpace(info.MotionURL) != "" {
 		if _, err := exec.LookPath("ffmpeg"); err != nil {
-			fmt.Printf("cached song extra animated skipped (%s): ffmpeg not found\n", songID)
+			logWarnf("cached song extra animated skipped (%s): ffmpeg not found", songID)
 			return
 		}
 		tmp, err := os.CreateTemp("", "amdl-cached-song-animated-*.mp4")
 		if err != nil {
-			b.logTelegramPrintf("cached song extra animated skipped (%s): %v\n", songID, err)
+			logWarnf("cached song extra animated skipped (%s): %v", songID, err)
 			return
 		}
 		tmpPath := tmp.Name()
 		_ = tmp.Close()
 		defer os.Remove(tmpPath)
 		if err := b.saveAnimatedCover(info.MotionURL, tmpPath); err != nil {
-			b.logTelegramPrintf("cached song extra animated skipped (%s): %v\n", songID, err)
+			logWarnf("cached song extra animated skipped (%s): %v", songID, err)
 			return
 		}
 		if err := b.sendVideoFile(chatID, tmpPath, replyToID, "", nil, ""); err != nil {
 			displayName := displayBase + "-animated-cover.mp4"
 			if docErr := b.sendDocumentFile(chatID, tmpPath, displayName, replyToID, nil, ""); docErr != nil {
-				b.logTelegramPrintf("send cached animated cover error (%s): %v; fallback: %v\n", songID, err, docErr)
+				logWarnf("send cached animated cover error (%s): %v; fallback: %v", songID, err, docErr)
 			}
 		}
 	}

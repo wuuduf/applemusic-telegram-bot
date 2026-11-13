@@ -278,7 +278,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 						downloadFailed = true
 						return
 					}
-					fmt.Printf("Failed to rip artist song %s: %v\n", trackID, err)
+					logWarnf("Failed to rip artist song %s: %v", trackID, err)
 					session.Counter.Error++
 				}
 				return
@@ -331,6 +331,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 		if b.cleanupTracker != nil {
 			b.cleanupTracker.RecordPaths(filteredPaths)
 		}
+		unpinTrackPaths := b.cleanupTracker.pinPaths(filteredPaths)
 
 		sentPrimary := false
 		for pathIdx, path := range filteredPaths {
@@ -341,9 +342,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 				break
 			}
 			if err := b.sendDownloadedPathWithRetry(session, chatID, path, replyToID, status, settings); err != nil {
-				sanitized := sanitizeTelegramError(err, b.token)
-				fmt.Printf("send file error (%s): %s\n", path, sanitized)
-				appendRuntimeErrorLogf("send file error (%s): %s", path, sanitized)
+				logErrorf("send file error (%s): %v", path, err)
 				if status != nil && reportTrackProgress {
 					status.Update(fmt.Sprintf("Failed to send %s: %s", filepath.Base(path), b.sanitizeTelegramErr(err)), 0, 0)
 				}
@@ -356,6 +355,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 				sentExtraPaths[path] = struct{}{}
 			}
 		}
+		unpinTrackPaths()
 		if status != nil && reportTrackProgress {
 			status.Update(trackLabel, int64(idx+1), int64(totalTracks))
 		}
@@ -388,7 +388,7 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 	startedAt := time.Now()
 	taskResult := "unknown"
 	success := false
-	fmt.Printf("telegram task start chat=%d media=%s:%s storefront=%s transfer=%s single=%t refresh=%t\n", chatID, mediaType, mediaID, storefront, transferMode, single, forceRefresh)
+	logInfof("telegram task start chat=%d media=%s:%s storefront=%s transfer=%s single=%t refresh=%t", chatID, mediaType, mediaID, storefront, transferMode, single, forceRefresh)
 	defer func() {
 		if rec := recover(); rec != nil {
 			taskResult = "panic"
@@ -402,7 +402,7 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 			}
 		}
 		elapsed := time.Since(startedAt)
-		fmt.Printf("telegram task end chat=%d media=%s:%s result=%s elapsed=%s\n", chatID, mediaType, mediaID, taskResult, elapsed.Round(time.Millisecond))
+		logInfof("telegram task end chat=%d media=%s:%s result=%s elapsed=%s", chatID, mediaType, mediaID, taskResult, elapsed.Round(time.Millisecond))
 		if b.history != nil {
 			b.history.Record(chatID, downloadHistoryEntry{
 				MediaType:  mediaType,
@@ -528,6 +528,11 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 		}
 	}
 
+	// Everything is downloaded before anything is uploaded on this path, so
+	// keep quota cleanup away from this task's output until it is done.
+	releaseTaskFiles := b.cleanupTracker.beginTask()
+	defer releaseTaskFiles()
+
 	paths := []string{}
 	primaryCount := 0
 	var session *DownloadSession
@@ -554,7 +559,7 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 		if mediaType == mediaTypeSong || mediaType == mediaTypeAlbum || mediaType == mediaTypeArtistSongs {
 			paths = b.augmentDownloadedPaths(paths, settings)
 		}
-		fmt.Printf("telegram task ready chat=%d media=%s:%s primary=%d total=%d transfer=%s\n", chatID, mediaType, mediaID, primaryCount, len(paths), transferMode)
+		logInfof("telegram task ready chat=%d media=%s:%s primary=%d total=%d transfer=%s", chatID, mediaType, mediaID, primaryCount, len(paths), transferMode)
 		return nil
 	}()
 	if coreErr != nil {
@@ -579,6 +584,9 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 	if b.cleanupTracker != nil {
 		b.cleanupTracker.RecordPaths(paths)
 	}
+	// Reused local files are older than this task; pin them explicitly.
+	unpinPaths := b.cleanupTracker.pinPaths(paths)
+	defer unpinPaths()
 
 	if transferMode == transferModeZip {
 		if status != nil {
@@ -595,12 +603,16 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 		if mediaID != "" && mediaType != "" {
 			cacheKey = b.bundleZipCacheKey(mediaType, mediaID, settings)
 		}
-		if err := b.sendDocumentFile(chatID, zipPath, displayName, replyToID, status, cacheKey); err != nil {
+		if err := b.sendDocumentFileWithContext(ctx, chatID, zipPath, displayName, replyToID, status, cacheKey); err != nil {
+			if ctx.Err() != nil {
+				taskResult = "canceled(zip)"
+				status.UpdateSync("Canceled.", 0, 0)
+				return false
+			}
 			sanitized := sanitizeTelegramError(err, b.token)
-			fmt.Println("send ZIP error:", sanitized)
-			appendRuntimeErrorLogf("send ZIP error (%s:%s): %s", mediaType, mediaID, sanitized)
+			logErrorf("send ZIP error (%s:%s): %s", mediaType, mediaID, sanitized)
 			if zipSendFailureNeedsFallback(err) {
-				fmt.Printf("telegram zip fallback chat=%d media=%s:%s reason=%s\n", chatID, mediaType, mediaID, sanitized)
+				logWarnf("telegram zip fallback chat=%d media=%s:%s reason=%s", chatID, mediaType, mediaID, sanitized)
 				status.UpdateSync("ZIP exceeds Telegram limit or upload stalled, fallback to one-by-one transfer.", 0, 0)
 			} else {
 				taskResult = fmt.Sprintf("zip-send-failed: %s", sanitized)

@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +19,43 @@ import (
 	"time"
 )
 
+var ffmpegDurationRe = regexp.MustCompile(`Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)`)
+
 const (
 	downloadStatusErrorLogInterval = 30 * time.Second
 	downloadStatusMinEditInterval  = 30 * time.Second
+)
+
+// Wording of failed sends. Tests and the retry/fallback paths match on it.
+var (
+	sendMessageErrorText = telegramErrorText(
+		func(e *telegramAPIError) string {
+			return telegramAPIHTTPErrorText("telegram sendMessage", e.Status, e.Body)
+		},
+		telegramErrorWithParameters("telegram sendMessage"),
+	)
+	sendDocumentErrorText = telegramErrorText(
+		telegramFailedBody("telegram sendDocument"),
+		telegramErrorDescription("telegram sendDocument"),
+	)
+	sendVideoErrorText = telegramErrorText(
+		telegramFailedBody("telegram sendVideo"),
+		telegramErrorDescription("telegram sendVideo"),
+	)
+	sendAudioErrorText = telegramErrorText(
+		telegramFailedBody("telegram sendAudio"),
+		telegramErrorWithParameters("telegram sendAudio"),
+	)
+	// A streamed upload that fails without a body reports the HTTP status.
+	sendAudioUploadErrorText = telegramErrorText(
+		func(e *telegramAPIError) string {
+			if e.Body == "" {
+				return "telegram sendAudio failed: " + e.Status
+			}
+			return "telegram sendAudio failed: " + e.Body
+		},
+		telegramErrorWithParameters("telegram sendAudio"),
+	)
 )
 
 func combineStreamingRequestError(reqErr error, writeErr error) error {
@@ -44,23 +77,32 @@ func closeHTTPIdleConnections(client *http.Client) {
 	}
 }
 
-func newUploadWatchdog(parent context.Context, timeout time.Duration) (context.Context, func(), func(), func() bool) {
+// newUploadWatchdog returns a context that is canceled when no progress is
+// reported for timeout. stop ends the watching only (the request may still be
+// reading its response); release also cancels the context and must be called
+// once the request is completely finished so the context is not left
+// registered on its long-lived parent.
+func newUploadWatchdog(parent context.Context, timeout time.Duration) (ctx context.Context, touch func(), stop func(), stalledFn func() bool, release func()) {
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
+	release = func() {
+		stop()
+		cancel()
+	}
 	var mu sync.Mutex
 	lastProgress := time.Now()
 	stalled := atomic.Bool{}
 	doneCh := make(chan struct{})
 	var doneOnce sync.Once
 
-	touch := func() {
+	touch = func() {
 		mu.Lock()
 		lastProgress = time.Now()
 		mu.Unlock()
 	}
-	stop := func() {
+	stop = func() {
 		doneOnce.Do(func() {
 			close(doneCh)
 		})
@@ -90,7 +132,7 @@ func newUploadWatchdog(parent context.Context, timeout time.Duration) (context.C
 		})
 	}()
 
-	return ctx, touch, stop, stalled.Load
+	return ctx, touch, stop, stalled.Load, release
 }
 
 func copyWithUploadProgress(dst io.Writer, src io.Reader, total int64, status *DownloadStatus, phase string, onProgress func()) (int64, error) {
@@ -212,27 +254,26 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			b.logTelegramPrintf("%s canceled before attempt %d/%d: %v\n", label, attempt, maxAttempts, err)
+			logWarnf("%s canceled before attempt %d/%d: %v", label, attempt, maxAttempts, err)
 			return err
 		}
 		lastErr = fn()
 		if lastErr == nil {
 			if attempt > 1 {
-				fmt.Printf("%s succeeded on retry %d/%d\n", label, attempt, maxAttempts)
+				logInfof("%s succeeded on retry %d/%d", label, attempt, maxAttempts)
 			}
 			return nil
 		}
-		sanitized := sanitizeTelegramError(lastErr, b.token)
 		retryAfter, hasRetryAfter := parseTelegramRetryAfter(lastErr)
 		if hasRetryAfter {
 			b.applyTelegramRetryAfter(retryAfter)
-			fmt.Printf("%s attempt %d/%d hit retry_after=%s: %s\n", label, attempt, maxAttempts, retryAfter.Round(time.Second), sanitized)
+			logWarnf("%s attempt %d/%d hit retry_after=%s: %v", label, attempt, maxAttempts, retryAfter.Round(time.Second), lastErr)
 		} else {
-			fmt.Printf("%s attempt %d/%d failed: %s\n", label, attempt, maxAttempts, sanitized)
+			logWarnf("%s attempt %d/%d failed: %v", label, attempt, maxAttempts, lastErr)
 		}
 		if attempt == maxAttempts || (!isRetryableUploadError(lastErr) && !hasRetryAfter) {
 			b.noteTelegramRateLimit(lastErr)
-			fmt.Printf("%s giving up after attempt %d/%d: %s\n", label, attempt, maxAttempts, sanitized)
+			logWarnf("%s giving up after attempt %d/%d: %v", label, attempt, maxAttempts, lastErr)
 			return lastErr
 		}
 		if status != nil {
@@ -247,16 +288,16 @@ func (b *TelegramBot) sendWithRetry(ctx context.Context, status *DownloadStatus,
 		closeHTTPIdleConnections(b.client)
 		closeHTTPIdleConnections(b.pollClient)
 		if hasRetryAfter {
-			fmt.Printf("%s waiting %s before retry %d/%d\n", label, retryAfter.Round(time.Second), attempt+1, maxAttempts)
+			logInfof("%s waiting %s before retry %d/%d", label, retryAfter.Round(time.Second), attempt+1, maxAttempts)
 			if err := sleepWithContext(ctx, retryAfter); err != nil {
-				b.logTelegramPrintf("%s retry wait canceled: %v\n", label, err)
+				logWarnf("%s retry wait canceled: %v", label, err)
 				return err
 			}
 		} else {
 			wait := time.Duration(attempt) * time.Second
-			fmt.Printf("%s waiting %s before retry %d/%d\n", label, wait, attempt+1, maxAttempts)
+			logInfof("%s waiting %s before retry %d/%d", label, wait, attempt+1, maxAttempts)
 			if err := sleepWithContext(ctx, wait); err != nil {
-				b.logTelegramPrintf("%s retry wait canceled: %v\n", label, err)
+				logWarnf("%s retry wait canceled: %v", label, err)
 				return err
 			}
 		}
@@ -270,12 +311,16 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 	if info, err := os.Stat(filePath); err == nil && info != nil {
 		sizeLabel = formatBytes(info.Size())
 	}
-	fmt.Printf("telegram send file start chat=%d path=%s size=%s\n", chatID, filePath, sizeLabel)
+	logInfof("telegram send file start chat=%d path=%s size=%s", chatID, filePath, sizeLabel)
 	var finalErr error
 	uploadCtx := b.uploadContext(session)
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".m4a", ".flac", ".mp3", ".aac", ".wav", ".opus":
+		if session != nil {
+			session.beginCompressedUploadReuse(filePath)
+			defer session.endCompressedUploadReuse(filePath)
+		}
 		audioErr := b.sendWithRetry(uploadCtx, status, "Audio upload", 2, func() error {
 			return b.sendAudioFile(session, chatID, filePath, replyToID, status, settings.Format)
 		})
@@ -305,10 +350,10 @@ func (b *TelegramBot) sendDownloadedPathWithRetry(session *DownloadSession, chat
 	}
 	if finalErr != nil {
 		appRuntimeMetrics.recordUploadFailure()
-		b.logTelegramPrintf("telegram send file failed chat=%d path=%s elapsed=%s err=%v\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond), finalErr)
+		logWarnf("telegram send file failed chat=%d path=%s elapsed=%s err=%v", chatID, filePath, time.Since(startedAt).Round(time.Millisecond), finalErr)
 	} else {
 		appRuntimeMetrics.recordUploadSuccess()
-		fmt.Printf("telegram send file finished chat=%d path=%s elapsed=%s\n", chatID, filePath, time.Since(startedAt).Round(time.Millisecond))
+		logInfof("telegram send file finished chat=%d path=%s elapsed=%s", chatID, filePath, time.Since(startedAt).Round(time.Millisecond))
 	}
 	return finalErr
 }
@@ -318,15 +363,15 @@ func formatMVCaption(meta AudioMeta, sizeBytes int64) string {
 	title := strings.TrimSpace(meta.Title)
 	performer := strings.TrimSpace(meta.Performer)
 	if title == "" && performer == "" {
-		return fmt.Sprintf("#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", sizeMB)
+		return withCaptionSignature(fmt.Sprintf("#AppleMusic #mv %.2fMB", sizeMB))
 	}
 	if performer != "" && title != "" {
-		return fmt.Sprintf("%s - %s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", performer, title, sizeMB)
+		return withCaptionSignature(fmt.Sprintf("%s - %s\n#AppleMusic #mv %.2fMB", performer, title, sizeMB))
 	}
 	if title != "" {
-		return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", title, sizeMB)
+		return withCaptionSignature(fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB", title, sizeMB))
 	}
-	return fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB\nvia @jellyamdl_bot", performer, sizeMB)
+	return withCaptionSignature(fmt.Sprintf("%s\n#AppleMusic #mv %.2fMB", performer, sizeMB))
 }
 
 func (b *TelegramBot) sendMusicVideoFile(session *DownloadSession, chatID int64, filePath string, replyToID int, status *DownloadStatus, settings ChatDownloadSettings) error {
@@ -404,11 +449,14 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	thumbPath := ""
 	compressedPath := ""
 	compressed := false
+	// compressedRetained: the session keeps the compressed copy so an upload
+	// retry does not run the FLAC compression again.
+	compressedRetained := false
 	cleanup := func() {
 		if thumbPath != "" {
 			_ = os.Remove(thumbPath)
 		}
-		if compressedPath != "" {
+		if compressedPath != "" && !compressedRetained {
 			_ = os.Remove(compressedPath)
 		}
 	}
@@ -425,9 +473,15 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		if status != nil {
 			status.Update("Compressing", 0, 0)
 		}
-		compressedPath, err = b.compressFlacToSize(uploadCtx, sendPath, b.maxFileBytes)
-		if err != nil {
-			return err
+		if reused := session.reusableCompressedUpload(filePath); reused != "" {
+			compressedPath = reused
+			compressedRetained = true
+		} else {
+			compressedPath, err = b.compressFlacToSize(uploadCtx, sendPath, b.maxFileBytes)
+			if err != nil {
+				return err
+			}
+			compressedRetained = session.retainCompressedUpload(filePath, compressedPath)
 		}
 		sendPath = compressedPath
 		compressed = true
@@ -478,8 +532,8 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 	writeErrCh := make(chan error, 1)
-	ctx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(uploadCtx, uploadNoProgressTimeout)
-	defer stopWatchdog()
+	ctx, touchProgress, stopWatchdog, watchdogStalled, releaseWatchdog := newUploadWatchdog(uploadCtx, uploadNoProgressTimeout)
+	defer releaseWatchdog()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendAudio"), pr)
 	if err != nil {
@@ -555,7 +609,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		_ = pw.CloseWithError(err)
 		writeErr := <-writeErrCh
 		if watchdogStalled() {
-			return fmt.Errorf("audio upload stalled: no progress for %s", uploadNoProgressTimeout)
+			return fmt.Errorf("audio %w: no progress for %s", errUploadStalled, uploadNoProgressTimeout)
 		}
 		return combineStreamingRequestError(err, writeErr)
 	}
@@ -565,32 +619,18 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		return writeErr
 	}
 	responseBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		msg := strings.TrimSpace(string(responseBody))
-		if msg == "" {
-			msg = resp.Status
-		}
-		err = fmt.Errorf("telegram sendAudio failed: %s", msg)
-		b.noteTelegramRateLimit(err)
-		return annotateFilePartsInvalidError(err, sizeBytes, b.maxFileBytes)
-	}
-	apiResp := sendAudioResponse{}
-	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = telegramAPIResponseError("telegram sendAudio", apiResp.Description, apiResp.Parameters)
-		b.noteTelegramRateLimit(err)
+	sent, err := decodeTelegramResponse[AudioMessage](b, "sendAudio", resp.StatusCode, resp.Status, responseBody, sendAudioUploadErrorText)
+	if err != nil {
 		return annotateFilePartsInvalidError(err, sizeBytes, b.maxFileBytes)
 	}
 	shouldCacheAudio := true
 	if session != nil {
 		shouldCacheAudio = session.Config.EmbedLrc && session.Config.EmbedCover
 	}
-	if shouldCacheAudio && hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
+	if shouldCacheAudio && hasMeta && meta.TrackID != "" && sent.Audio.FileID != "" {
 		b.storeCachedAudio(meta.TrackID, CachedAudio{
-			FileID:         apiResp.Result.Audio.FileID,
-			FileSize:       apiResp.Result.Audio.FileSize,
+			FileID:         sent.Audio.FileID,
+			FileSize:       sent.Audio.FileSize,
 			Compressed:     compressed,
 			Format:         format,
 			SizeBytes:      sizeBytes,
@@ -604,10 +644,10 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 			CreatedAt:      time.Now(),
 		})
 	}
-	if hasMeta && meta.TrackID != "" && apiResp.Result.Audio.FileID != "" {
+	if hasMeta && meta.TrackID != "" && sent.Audio.FileID != "" {
 		b.forwardSongAudioToArchiveAsync(chatID, meta.TrackID, CachedAudio{
-			FileID:         apiResp.Result.Audio.FileID,
-			FileSize:       apiResp.Result.Audio.FileSize,
+			FileID:         sent.Audio.FileID,
+			FileSize:       sent.Audio.FileSize,
 			Compressed:     compressed,
 			Format:         format,
 			SizeBytes:      sizeBytes,
@@ -622,7 +662,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 		})
 	}
 	if hasMeta {
-		b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, meta)
+		b.maybeSendSongCommentAfterAudio(chatID, sent.MessageID, meta)
 	}
 	return nil
 }
@@ -638,10 +678,16 @@ func zipSendFailureNeedsFallback(err error) bool {
 	if err == nil {
 		return false
 	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "zip exceeds telegram limit") ||
-		strings.Contains(lower, "upload stalled")
+	return errors.Is(err, errTelegramFileTooLarge) || errors.Is(err, errUploadStalled)
 }
+
+// fileTooLargeError keeps the user-facing size message while matching
+// errTelegramFileTooLarge with errors.Is.
+type fileTooLargeError struct{ msg string }
+
+func (e fileTooLargeError) Error() string { return e.msg }
+
+func (e fileTooLargeError) Is(target error) bool { return target == errTelegramFileTooLarge }
 
 func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID int64, filePath string, displayName string, replyToID int, status *DownloadStatus, cacheKey string) error {
 	if displayName == "" {
@@ -662,9 +708,9 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 	}
 	if info.Size() > b.maxFileBytes {
 		if strings.HasSuffix(strings.ToLower(displayName), ".zip") {
-			return fmt.Errorf("ZIP exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)
+			return fileTooLargeError{fmt.Sprintf("ZIP exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)}
 		}
-		return fmt.Errorf("file exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)
+		return fileTooLargeError{fmt.Sprintf("file exceeds Telegram limit (%dMB)", b.maxFileBytes/1024/1024)}
 	}
 	uploadPhase := "Uploading document"
 	if status != nil {
@@ -674,8 +720,8 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 		status.Update(uploadPhase, 0, info.Size())
 	}
 
-	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
-	defer stopWatchdog()
+	reqCtx, touchProgress, _, watchdogStalled, releaseWatchdog := newUploadWatchdog(ctx, uploadNoProgressTimeout)
+	defer releaseWatchdog()
 
 	fields := []multipartField{{name: "chat_id", value: strconv.FormatInt(chatID, 10)}}
 	if replyToID > 0 {
@@ -705,30 +751,20 @@ func (b *TelegramBot) sendDocumentFileWithContext(ctx context.Context, chatID in
 	resp, err := b.client.Do(req)
 	if err != nil {
 		if watchdogStalled() {
-			return fmt.Errorf("document upload stalled: no progress for %s", uploadNoProgressTimeout)
+			return fmt.Errorf("document %w: no progress for %s", errUploadStalled, uploadNoProgressTimeout)
 		}
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		err = fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
+	responseBody, _ := io.ReadAll(resp.Body)
+	sent, err := decodeTelegramResponse[DocumentMessage](b, "sendDocument", resp.StatusCode, resp.Status, responseBody, sendDocumentErrorText)
+	if err != nil {
 		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
-	apiResp := sendDocumentResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
-	}
-	if cacheKey != "" && apiResp.Result.Document.FileID != "" {
+	if cacheKey != "" && sent.Document.FileID != "" {
 		b.storeCachedDocument(cacheKey, CachedDocument{
-			FileID:   apiResp.Result.Document.FileID,
-			FileSize: apiResp.Result.Document.FileSize,
+			FileID:   sent.Document.FileID,
+			FileSize: sent.Document.FileSize,
 		})
 	}
 	return nil
@@ -749,36 +785,8 @@ func (b *TelegramBot) sendDocumentByFileID(chatID int64, entry CachedDocument, r
 	if replyToID > 0 {
 		payload["reply_to_message_id"] = replyToID
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendDocument"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		err = fmt.Errorf("telegram sendDocument failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	apiResp := apiResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendDocument error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	return nil
+	_, err := callTelegramJSON[telegramNoResult](ctx, b, "sendDocument", payload, sendDocumentErrorText)
+	return err
 }
 
 func (b *TelegramBot) sendVideoFile(chatID int64, filePath string, replyToID int, caption string, status *DownloadStatus, cacheKey string) error {
@@ -806,8 +814,8 @@ func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64
 		status.Update("Uploading video", 0, info.Size())
 	}
 
-	reqCtx, touchProgress, stopWatchdog, watchdogStalled := newUploadWatchdog(ctx, uploadNoProgressTimeout)
-	defer stopWatchdog()
+	reqCtx, touchProgress, _, watchdogStalled, releaseWatchdog := newUploadWatchdog(ctx, uploadNoProgressTimeout)
+	defer releaseWatchdog()
 
 	fields := []multipartField{
 		{name: "chat_id", value: strconv.FormatInt(chatID, 10)},
@@ -843,30 +851,20 @@ func (b *TelegramBot) sendVideoFileWithContext(ctx context.Context, chatID int64
 	resp, err := b.client.Do(req)
 	if err != nil {
 		if watchdogStalled() {
-			return fmt.Errorf("video upload stalled: no progress for %s", uploadNoProgressTimeout)
+			return fmt.Errorf("video %w: no progress for %s", errUploadStalled, uploadNoProgressTimeout)
 		}
 		return err
 	}
 	defer resp.Body.Close()
 	responseBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
+	sent, err := decodeTelegramResponse[VideoMessage](b, "sendVideo", resp.StatusCode, resp.Status, responseBody, sendVideoErrorText)
+	if err != nil {
 		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
 	}
-	apiResp := sendVideoResponse{}
-	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return annotateFilePartsInvalidError(err, info.Size(), b.maxFileBytes)
-	}
-	if cacheKey != "" && apiResp.Result.Video.FileID != "" {
+	if cacheKey != "" && sent.Video.FileID != "" {
 		b.storeCachedVideo(cacheKey, CachedVideo{
-			FileID:   apiResp.Result.Video.FileID,
-			FileSize: apiResp.Result.Video.FileSize,
+			FileID:   sent.Video.FileID,
+			FileSize: sent.Video.FileSize,
 		})
 	}
 	return nil
@@ -887,36 +885,8 @@ func (b *TelegramBot) sendVideoByFileID(chatID int64, entry CachedVideo, replyTo
 	if replyToID > 0 {
 		payload["reply_to_message_id"] = replyToID
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendVideo"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		err = fmt.Errorf("telegram sendVideo failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	apiResp := apiResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = fmt.Errorf("telegram sendVideo error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	return nil
+	_, err := callTelegramJSON[telegramNoResult](ctx, b, "sendVideo", payload, sendVideoErrorText)
+	return err
 }
 
 type DownloadStatus struct {
@@ -945,9 +915,7 @@ func newDownloadStatus(bot *TelegramBot, chatID int64, replyToID int) (*Download
 	messageID, err := bot.sendMessageWithReplyReturn(chatID, "Starting download...", nil, replyToID)
 	if err != nil {
 		if isTelegramRateLimitError(err) {
-			sanitized := sanitizeTelegramError(err, bot.token)
-			fmt.Printf("telegram status create deferred chat=%d: %s; continuing without status message\n", chatID, sanitized)
-			appendRuntimeErrorLogf("telegram status create deferred chat=%d: %s", chatID, sanitized)
+			logErrorf("telegram status create deferred chat=%d: %v; continuing without status message", chatID, err)
 			return newDisabledDownloadStatus(bot, chatID), nil
 		}
 		return nil, err
@@ -1155,8 +1123,7 @@ func (s *DownloadStatus) logUpdateError(err error) {
 	if !shouldLog {
 		return
 	}
-	fmt.Printf("telegram status update failed chat=%d message=%d: %s\n", s.chatID, s.messageID, sanitized)
-	appendRuntimeErrorLogf("telegram status update failed chat=%d message=%d: %s", s.chatID, s.messageID, sanitized)
+	logErrorf("telegram status update failed chat=%d message=%d: %s", s.chatID, s.messageID, sanitized)
 }
 
 func (s *DownloadStatus) isMuted() bool {
@@ -1178,7 +1145,6 @@ func (s *DownloadStatus) muteOnRateLimit(err error) bool {
 			return false
 		}
 	}
-	sanitized := sanitizeTelegramError(err, s.bot.token)
 	shouldLog := false
 	s.mu.Lock()
 	if !s.muted {
@@ -1188,8 +1154,7 @@ func (s *DownloadStatus) muteOnRateLimit(err error) bool {
 	s.dirty = false
 	s.mu.Unlock()
 	if shouldLog {
-		fmt.Printf("telegram status muted chat=%d message=%d due to rate limit: %s\n", s.chatID, s.messageID, sanitized)
-		appendRuntimeErrorLogf("telegram status muted chat=%d message=%d due to rate limit: %s", s.chatID, s.messageID, sanitized)
+		logErrorf("telegram status muted chat=%d message=%d due to rate limit: %v", s.chatID, s.messageID, err)
 	}
 	return true
 }
@@ -1248,7 +1213,7 @@ func formatTelegramCaption(sizeBytes int64, bitrateKbps float64, format string) 
 	if tag == "" {
 		tag = defaultTelegramFormat
 	}
-	return fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps\nvia @jellyamdl_bot", tag, sizeMB, bitrateKbps)
+	return withCaptionSignature(fmt.Sprintf("#AppleMusic #%s 文件大小%.2fMB %.2fkbps", tag, sizeMB, bitrateKbps))
 }
 
 func formatTelegramAudioCaption(sizeBytes int64, bitrateKbps float64, format string, meta AudioMeta) string {
@@ -1276,8 +1241,7 @@ func formatTelegramAudioCaption(sizeBytes int64, bitrateKbps float64, format str
 	if len(filteredGenres) > 0 {
 		lines = append(lines, "风格："+strings.Join(filteredGenres, " / "))
 	}
-	lines = append(lines, "via @jellyamdl_bot")
-	return strings.Join(lines, "\n")
+	return withCaptionSignature(strings.Join(lines, "\n"))
 }
 
 func extractInlineTrackID(query string) string {
@@ -1393,6 +1357,7 @@ func (b *TelegramBot) compressFlacToSize(ctx context.Context, srcPath string, ma
 		return "", err
 	}
 	if info.Size() > maxBytes {
+		_ = os.Remove(outPath)
 		return "", fmt.Errorf("cannot compress below %dMB", maxBytes/1024/1024)
 	}
 	return outPath, nil
@@ -1479,8 +1444,7 @@ func getAudioDurationSeconds(ctx context.Context, path string) (float64, error) 
 	}
 
 	outResult, _ := runExternalCommand(ctx, Config.FFmpegPath, "-i", path)
-	re := regexp.MustCompile(`Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)`)
-	match := re.FindStringSubmatch(outResult.Combined)
+	match := ffmpegDurationRe.FindStringSubmatch(outResult.Combined)
 	if len(match) != 4 {
 		return 0, fmt.Errorf("failed to read duration from ffmpeg output")
 	}
@@ -1515,37 +1479,12 @@ func (b *TelegramBot) sendMessageWithReplyReturn(chatID int64, text string, mark
 	if replyToID > 0 {
 		payload["reply_to_message_id"] = replyToID
 	}
-	body, err := json.Marshal(payload)
+	sent, err := callTelegramJSON[Message](ctx, b, "sendMessage", payload, sendMessageErrorText)
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendMessage"), bytes.NewReader(body))
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		err = telegramAPIHTTPError("telegram sendMessage", resp.Status, responseBody)
-		b.noteTelegramRateLimit(err)
-		return 0, err
-	}
-	apiResp := sendMessageResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return 0, err
-	}
-	if !apiResp.OK {
-		err = telegramAPIResponseError("telegram sendMessage", apiResp.Description, apiResp.Parameters)
-		b.noteTelegramRateLimit(err)
-		return 0, err
-	}
-	b.scheduleAutoDeleteMessage(chatID, apiResp.Result.MessageID, b.shouldMarkAutoDeleteSticky(markup))
-	return apiResp.Result.MessageID, nil
+	b.scheduleAutoDeleteMessage(chatID, sent.MessageID, b.shouldMarkAutoDeleteSticky(markup))
+	return sent.MessageID, nil
 }
 
 func (b *TelegramBot) sendAudioByFileID(chatID int64, entry CachedAudio, replyToID int, trackID string) error {
@@ -1587,8 +1526,7 @@ func (b *TelegramBot) forwardSongAudioToArchiveAsync(sourceChatID int64, trackID
 			return
 		}
 		if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, forwardEntry, 0, trackID); err != nil {
-			b.logTelegramPrintf("telegram archive forward failed source=%d target=%d track=%s err=%v\n", sourceChatID, targetChatID, trackID, err)
-			b.appendTelegramRuntimeErrorLogf("telegram archive forward failed source=%d target=%d track=%s err=%v", sourceChatID, targetChatID, trackID, err)
+			logErrorf("telegram archive forward failed source=%d target=%d track=%s err=%v", sourceChatID, targetChatID, trackID, err)
 		}
 	})
 }
@@ -1635,44 +1573,19 @@ func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAud
 	if replyToID > 0 {
 		payload["reply_to_message_id"] = replyToID
 	}
-	body, err := json.Marshal(payload)
+	sent, err := callTelegramJSON[AudioMessage](ctx, b, "sendAudio", payload, sendAudioErrorText)
 	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("sendAudio"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		err = fmt.Errorf("telegram sendAudio failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	apiResp := sendAudioResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		err = telegramAPIResponseError("telegram sendAudio", apiResp.Description, apiResp.Parameters)
-		b.noteTelegramRateLimit(err)
 		return err
 	}
 	if enableArchiveForward {
 		forwardEntry := cloneCachedAudioEntry(entry)
-		if strings.TrimSpace(apiResp.Result.Audio.FileID) != "" {
-			forwardEntry.FileID = strings.TrimSpace(apiResp.Result.Audio.FileID)
+		if strings.TrimSpace(sent.Audio.FileID) != "" {
+			forwardEntry.FileID = strings.TrimSpace(sent.Audio.FileID)
 		}
-		if apiResp.Result.Audio.FileSize > 0 {
-			forwardEntry.FileSize = apiResp.Result.Audio.FileSize
+		if sent.Audio.FileSize > 0 {
+			forwardEntry.FileSize = sent.Audio.FileSize
 			if forwardEntry.SizeBytes <= 0 {
-				forwardEntry.SizeBytes = apiResp.Result.Audio.FileSize
+				forwardEntry.SizeBytes = sent.Audio.FileSize
 			}
 		}
 		if forwardEntry.CreatedAt.IsZero() {
@@ -1681,7 +1594,7 @@ func (b *TelegramBot) sendAudioByFileIDWithOptions(chatID int64, entry CachedAud
 		b.forwardSongAudioToArchiveAsync(chatID, trackID, forwardEntry)
 	}
 	if enableSongComment {
-		b.maybeSendSongCommentAfterAudio(chatID, apiResp.Result.MessageID, AudioMeta{
+		b.maybeSendSongCommentAfterAudio(chatID, sent.MessageID, AudioMeta{
 			TrackID:   strings.TrimSpace(trackID),
 			Title:     strings.TrimSpace(entry.Title),
 			Performer: strings.TrimSpace(entry.Performer),

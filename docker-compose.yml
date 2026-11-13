@@ -87,9 +87,10 @@ services:
 # 因为 bot 运行在容器内，不能再用 127.0.0.1 指向 wrapper / telegram-bot-api。
 # 请把 /app/config.yaml（即宿主机 ./config.yaml）中的以下项改为：
 #
-# decrypt-m3u8-port: "wrapper:10020"
-# get-m3u8-port: "wrapper:20020"
-# telegram-api-url: "http://telegram-bot-api:8081"
+# （主机名就是上面的 service 名；如果你改了 service 名，这里要一起改）
+# decrypt-m3u8-port: "wrapper-2:10020"
+# get-m3u8-port: "wrapper-2:20020"
+# telegram-api-url: "http://telegram-bot-api-2:8081"
 #
 # 启动：
 #   docker compose up -d --build

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -213,8 +214,68 @@ func (g *telegramResourceGuard) evaluate() {
 	g.set(false, "")
 }
 
+// currentProcessMemoryBytes reports the memory the bot is really using. The
+// download work happens in child processes (ffmpeg, MP4Box, mp4decrypt), so
+// the Go heap alone says little. Preference order:
+//  1. the container's anonymous memory from cgroup accounting, which covers
+//     child processes and excludes page cache from downloaded files;
+//  2. this process's resident set size;
+//  3. memory obtained from the OS by the Go runtime (non-Linux fallback).
 func currentProcessMemoryBytes() uint64 {
+	if value, ok := cgroupAnonymousMemoryBytes(); ok {
+		return value
+	}
+	if value, ok := processResidentMemoryBytes(); ok {
+		return value
+	}
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
-	return stats.Alloc
+	return stats.Sys
+}
+
+func cgroupAnonymousMemoryBytes() (uint64, bool) {
+	for _, candidate := range []struct{ path, key string }{
+		{"/sys/fs/cgroup/memory.stat", "anon"},             // cgroup v2
+		{"/sys/fs/cgroup/memory/memory.stat", "total_rss"}, // cgroup v1
+	} {
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			continue
+		}
+		if value, ok := parseMemoryStatValue(string(data), candidate.key); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func parseMemoryStatValue(content string, key string) (uint64, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != key {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return value, true
+	}
+	return 0, false
+}
+
+func processResidentMemoryBytes() (uint64, bool) {
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0, false
+	}
+	pages, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return pages * uint64(os.Getpagesize()), true
 }

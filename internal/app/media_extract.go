@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,24 +15,39 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	nethttp "github.com/wuuduf/applemusic-telegram-bot/utils/nethttp"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/structs"
 
 	"github.com/grafov/m3u8"
 	"github.com/olekukonko/tablewriter"
 )
 
+var (
+	mvAudioRankRe    = regexp.MustCompile(`_gr(\d+)_`)
+	aacStereoGroupRe = regexp.MustCompile(`audio-stereo-\d+`)
+)
+
+// deviceM3u8Timeout bounds the whole exchange with the wrapper's m3u8 port,
+// so a stalled wrapper cannot hold the download core lock forever.
+const deviceM3u8Timeout = 30 * time.Second
+
 func extractMvAudio(c string) (string, error) {
 	return extractMvAudioWithConfig(c, Config)
 }
 
 func extractMvAudioWithConfig(c string, cfg structs.ConfigSet) (string, error) {
+	return extractMvAudioWithContext(context.Background(), c, cfg)
+}
+
+func extractMvAudioWithContext(ctx context.Context, c string, cfg structs.ConfigSet) (string, error) {
 	MediaUrl, err := url.Parse(c)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := networkHTTPClient.Get(c)
+	resp, err := nethttp.GetWithContext(ctx, c)
 	if err != nil {
 		return "", err
 	}
@@ -61,7 +77,7 @@ func extractMvAudioWithConfig(c string, cfg structs.ConfigSet) (string, error) {
 		audioPriority = []string{"audio-stereo-256"}
 	}
 
-	re := regexp.MustCompile(`_gr(\d+)_`)
+	re := mvAudioRankRe
 
 	type AudioStream struct {
 		URL     string
@@ -111,12 +127,22 @@ func checkM3u8(session *DownloadSession, b string, f string) (string, error) {
 	var EnhancedHls string
 	if cfg.GetM3u8FromDevice {
 		adamID := b
-		conn, err := net.Dial("tcp", cfg.GetM3u8Port)
+		ctx := context.Background()
+		if session != nil {
+			ctx = session.downloadContext()
+		}
+		dialer := net.Dialer{Timeout: 10 * time.Second}
+		conn, err := dialer.DialContext(ctx, "tcp", cfg.GetM3u8Port)
 		if err != nil {
 			fmt.Println("Error connecting to device:", err)
 			return "none", err
 		}
 		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(deviceM3u8Timeout))
+		// Closing the connection is the only way to interrupt a blocked read
+		// when the task is canceled.
+		stopCancelWatch := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		defer stopCancelWatch()
 		if f == "song" {
 			fmt.Println("Connected to device")
 		}
@@ -171,7 +197,7 @@ func extractMedia(session *DownloadSession, b string, more_mode bool) (string, s
 	if err != nil {
 		return "", "", err
 	}
-	resp, err := networkHTTPClient.Get(b)
+	resp, err := nethttp.GetWithContext(session.downloadContext(), b)
 	if err != nil {
 		return "", "", err
 	}
@@ -323,8 +349,7 @@ func extractMedia(session *DownloadSession, b string, more_mode bool) (string, s
 				if debug_mode && !more_mode {
 					fmt.Printf("Debug: Found AAC variant - %s (Bitrate: %d)\n", variant.Audio, variant.Bandwidth)
 				}
-				aacregex := regexp.MustCompile(`audio-stereo-\d+`)
-				replaced := aacregex.ReplaceAllString(variant.Audio, "aac")
+				replaced := aacStereoGroupRe.ReplaceAllString(variant.Audio, "aac")
 				if replaced == cfg.AacType {
 					if !debug_mode && !more_mode {
 						fmt.Printf("%s\n", variant.Audio)
@@ -335,7 +360,7 @@ func extractMedia(session *DownloadSession, b string, more_mode bool) (string, s
 					}
 					streamUrl = streamUrlTemp
 					split := strings.Split(variant.Audio, "-")
-					Quality = fmt.Sprintf("%s Kbps", split[2])
+					Quality = fmt.Sprintf("%s Kbps", split[len(split)-1])
 					break
 				}
 			}
@@ -343,6 +368,9 @@ func extractMedia(session *DownloadSession, b string, more_mode bool) (string, s
 			if variant.Codecs == "alac" {
 				split := strings.Split(variant.Audio, "-")
 				length := len(split)
+				if length < 2 {
+					continue
+				}
 				length_int, err := strconv.Atoi(split[length-2])
 				if err != nil {
 					return "", "", err
@@ -378,12 +406,16 @@ func extractVideoWithConfig(c string, cfg structs.ConfigSet) (string, error) {
 }
 
 func extractVideoWithPreference(c string, cfg structs.ConfigSet, preference videoAspectPreference) (string, error) {
+	return extractVideoWithPreferenceContext(context.Background(), c, cfg, preference)
+}
+
+func extractVideoWithPreferenceContext(ctx context.Context, c string, cfg structs.ConfigSet, preference videoAspectPreference) (string, error) {
 	MediaUrl, err := url.Parse(c)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := networkHTTPClient.Get(c)
+	resp, err := nethttp.GetWithContext(ctx, c)
 	if err != nil {
 		return "", err
 	}

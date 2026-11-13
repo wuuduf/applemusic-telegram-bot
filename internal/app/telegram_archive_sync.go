@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"strings"
 	"time"
 )
@@ -106,6 +105,6 @@ func (b *TelegramBot) maybeIngestArchiveMessage(msg *Message) bool {
 		Storefront: meta.Storefront,
 		CreatedAt:  time.Now(),
 	})
-	fmt.Printf("telegram archive ingest cached audio chat=%d message=%d track=%s format=%s\n", msg.Chat.ID, msg.MessageID, meta.TrackID, meta.Format)
+	logInfof("telegram archive ingest cached audio chat=%d message=%d track=%s format=%s", msg.Chat.ID, msg.MessageID, meta.TrackID, meta.Format)
 	return true
 }

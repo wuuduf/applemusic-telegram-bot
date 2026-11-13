@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +12,10 @@ import (
 	apputils "github.com/wuuduf/applemusic-telegram-bot/utils"
 )
 
-const telegramStateVersion = 1
+const (
+	telegramStateVersion             = 1
+	defaultTelegramStateSaveDebounce = 300 * time.Millisecond
+)
 
 type telegramPersistedRequest struct {
 	RequestID    string               `json:"request_id"`
@@ -30,8 +34,16 @@ type telegramPersistedRequest struct {
 	Storefront   string               `json:"storefront"`
 	InflightKey  string               `json:"inflight_key"`
 	State        string               `json:"state"`
-	UpdatedAt    time.Time            `json:"updated_at"`
+	// Attempts counts how many times the request started running. A request
+	// that keeps taking the process down is dropped on recovery instead of
+	// being retried forever.
+	Attempts  int       `json:"attempts,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// maxRecoveredRequestAttempts is how many times a request may have been
+// running when the process died before recovery stops re-queueing it.
+const maxRecoveredRequestAttempts = 2
 
 type telegramPersistedAutoDelete struct {
 	ChatID    int64     `json:"chat_id"`
@@ -92,10 +104,21 @@ func (b *TelegramBot) startStateSaver() {
 			for {
 				select {
 				case <-saveCh:
+					// Message sends, auto-delete timers and task transitions
+					// arrive in bursts; coalesce them into one snapshot.
+					// stopStateSaver writes the final one.
+					select {
+					case <-time.After(defaultTelegramStateSaveDebounce):
+					case <-stopCh:
+						return
+					}
+					select {
+					case <-saveCh:
+					default:
+					}
 					runWithRecovery("telegram saveRuntimeStateNow", nil, func() {
 						if err := b.saveRuntimeStateNow(); err != nil {
-							b.logTelegramPrintf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
-							b.appendTelegramRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
+							logErrorf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 						}
 					})
 				case <-stopCh:
@@ -111,8 +134,7 @@ func (b *TelegramBot) stopStateSaver() {
 		return
 	}
 	if err := b.saveRuntimeStateNow(); err != nil {
-		b.logTelegramPrintf("telegram runtime state save failed (%s): %v\n", strings.TrimSpace(b.stateFile), err)
-		b.appendTelegramRuntimeErrorLogf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
+		logErrorf("telegram runtime state save failed (%s): %v", strings.TrimSpace(b.stateFile), err)
 	}
 	stopCh := b.stateStop
 	close(stopCh)
@@ -183,6 +205,7 @@ func (b *TelegramBot) markRequestRunning(requestID string) {
 	record, ok := b.activeRequests[requestID]
 	if ok {
 		record.State = "running"
+		record.Attempts++
 		record.UpdatedAt = time.Now()
 		b.activeRequests[requestID] = record
 	}
@@ -435,8 +458,7 @@ func (b *TelegramBot) restoreRuntimeState() {
 	}
 	if err != nil {
 		if !os.IsNotExist(err) {
-			b.logTelegramPrintf("telegram runtime state load failed: %v\n", err)
-			b.appendTelegramRuntimeErrorLogf("telegram runtime state load failed: %v", err)
+			logErrorf("telegram runtime state load failed: %v", err)
 		}
 		return
 	}
@@ -613,6 +635,18 @@ func (b *TelegramBot) restoreRuntimeState() {
 	recovered := 0
 	dropped := 0
 	for _, request := range state.Requests {
+		if strings.TrimSpace(request.State) == "running" && request.Attempts >= maxRecoveredRequestAttempts {
+			dropped++
+			b.releaseInflightDownload(request.InflightKey)
+			b.untrackRequest(request.RequestID)
+			logErrorf("telegram runtime recovery: dropping request %s (%s:%s) after %d interrupted attempts", request.RequestID, request.MediaType, request.MediaID, request.Attempts)
+			if chatID, replyToID := request.ChatID, request.ReplyToID; chatID != 0 {
+				b.launchBackgroundTask("telegram recovery notice", func(context.Context) {
+					_ = b.sendMessageWithReply(chatID, "任务多次在运行中被中断，已停止自动重试，请稍后手动重新发起。", nil, replyToID)
+				})
+			}
+			continue
+		}
 		req, err := b.buildRecoveredDownloadRequest(request)
 		if err != nil {
 			dropped++
@@ -629,7 +663,7 @@ func (b *TelegramBot) restoreRuntimeState() {
 		}
 	}
 	if recovered > 0 || dropped > 0 || recoveredAutoDelete > 0 {
-		fmt.Printf("telegram runtime recovery: queued=%d dropped=%d auto_delete=%d\n", recovered, dropped, recoveredAutoDelete)
+		logInfof("telegram runtime recovery: queued=%d dropped=%d auto_delete=%d", recovered, dropped, recoveredAutoDelete)
 	}
 	b.requestStateSave()
 }

@@ -45,6 +45,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	}
 	proxyFunc, proxyInfo := resolveTelegramProxy()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	registerLogSecret(token)
 	bot := &TelegramBot{
 		token:                   token,
 		apiBase:                 apiBase,
@@ -123,6 +124,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 	bot.requestStateSave()
 	bot.startMetricsHTTPServer()
 	bot.startSubscriptionWatcher()
+	bot.configureCaptionSignature()
 	if Config.TelegramSyncCommandMenu {
 		bot.launchBackgroundTask("telegram command menu sync", bot.syncTelegramCommandMenu)
 	}

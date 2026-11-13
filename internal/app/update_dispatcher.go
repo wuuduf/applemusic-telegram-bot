@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -96,9 +95,7 @@ func (d *updateDispatcher) Submit(upd Update) bool {
 	if len(queue) >= d.perChat {
 		d.dropped++
 		d.mu.Unlock()
-		msg := fmt.Sprintf("telegram update %d dropped: chat %d backlog is full (%d pending)", upd.UpdateID, key, d.perChat)
-		fmt.Println(msg)
-		appendRuntimeErrorLog(msg)
+		logErrorf("telegram update %d dropped: chat %d backlog is full (%d pending)", upd.UpdateID, key, d.perChat)
 		return false
 	}
 	d.queues[key] = append(queue, upd)

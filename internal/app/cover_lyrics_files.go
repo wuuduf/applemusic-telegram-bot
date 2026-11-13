@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -33,9 +32,9 @@ func writeCoverWithConfig(sanAlbumFolder, name string, url string, cfg *structs.
 		covPath = filepath.Join(sanAlbumFolder, name+"."+cfg.CoverFormat)
 	}
 	if cfg.CoverFormat == "png" {
-		re := regexp.MustCompile(`\{w\}x\{h\}`)
-		parts := re.Split(url, 2)
-		url = parts[0] + "{w}x{h}" + strings.Replace(parts[1], ".jpg", ".png", 1)
+		if parts := strings.SplitN(url, "{w}x{h}", 2); len(parts) == 2 {
+			url = parts[0] + "{w}x{h}" + strings.Replace(parts[1], ".jpg", ".png", 1)
+		}
 	}
 	url = strings.Replace(url, "{w}x{h}", cfg.CoverSize, 1)
 	if cfg.CoverFormat == "original" {

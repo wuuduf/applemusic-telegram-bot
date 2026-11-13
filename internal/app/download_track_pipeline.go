@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -296,7 +297,7 @@ func downloadTrackMediaStage(ctx *trackDownloadContext) bool {
 		}
 		if _, err := runv3.RunWithContext(ctx.session.downloadContext(), ctx.track.ID, ctx.trackPath, ctx.token, ctx.mediaUserToken, false, "", ctx.session.ActiveProgress); err != nil {
 			fmt.Println("Failed to dl aac-lc:", err)
-			if err.Error() == "Unavailable" {
+			if errors.Is(err, runv3.ErrUnavailable) {
 				ctx.session.Counter.Unavailable++
 				return false
 			}

@@ -49,6 +49,9 @@ var (
 	runtimeErrorLogPath     atomic.Value
 	errNoFilesDownloaded    = errors.New("no files were downloaded")
 	errTelegramSendDeferred = errors.New("telegram send deferred by limiter")
+	errUploadStalled        = errors.New("upload stalled")
+	errTelegramFileTooLarge = errors.New("file exceeds Telegram limit")
+	errNoArtistAlbums       = errors.New("no albums found")
 )
 
 const maxMediaIDLength = 128

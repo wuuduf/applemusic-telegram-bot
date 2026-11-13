@@ -101,6 +101,10 @@ type ConfigSet struct {
 	// (setMyCommands). Off by default because it replaces BotFather's menu.
 	TelegramSyncCommandMenu bool `yaml:"telegram-sync-command-menu"`
 
+	// Last line of media captions. Empty signs with the bot's own username
+	// ("via @<username>", read from getMe); "-" disables the line.
+	TelegramCaptionSignature string `yaml:"telegram-caption-signature"`
+
 	// Max Telegram update handlers running at once across chats (updates from
 	// the same chat stay in order).
 	TelegramUpdateConcurrency int `yaml:"telegram-update-concurrency"`

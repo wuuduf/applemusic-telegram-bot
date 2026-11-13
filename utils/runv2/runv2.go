@@ -35,6 +35,8 @@ const (
 	defaultHandshakeTimeout  = 10
 	defaultIdleConnTimeout   = 90
 	defaultExpectContinueSec = 1
+	decryptPhaseTimeout      = 5 * time.Minute
+	decryptCloseTimeout      = 500 * time.Millisecond
 )
 
 var ErrTimeout = errors.New("response timed out")
@@ -206,22 +208,26 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 	// connect to decryptor
 	//addr := fmt.Sprintf("127.0.0.1:10020")
 	addr := Config.DecryptM3u8Port
-	conn, err := net.Dial("tcp", addr)
+	conn, err := (&net.Dialer{Timeout: defaultDialTimeoutSec * time.Second}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
-	//fmt.Print("Decrypting...\n")
-	defer Close(conn)
+	// Bind only to the task context: runCtx may be canceled by the HTTP watchdog
+	// while this socket is still making healthy decryption progress.
+	decryptor := newDecryptConn(ctx, conn, decryptPhaseTimeout)
+	defer decryptor.Close()
 
-	err = downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
+	err = downloadAndDecryptFile(ctx, decryptor, body, outfile, adamId, segments, totalLen, Config, progress, "Downloading")
 	if err != nil {
 		return err
 	}
+	// Graceful marker is best-effort and independently bounded; errors skip it.
+	_ = Close(conn)
 	fmt.Print("Decrypted\n")
 	return nil
 }
 
-func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
+func downloadAndDecryptFile(ctx context.Context, conn io.ReadWriter, in io.Reader, outfile string,
 	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet, progress ProgressFunc, phase string) error {
 	inBuf := bufio.NewReader(in)
 	ofh, err := os.Create(outfile)
@@ -334,6 +340,9 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	}
 	err = outBuf.Flush()
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	success = true
@@ -549,6 +558,11 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 // Reset the loops on the script's end and close the connection
 func Close(conn io.WriteCloser) error {
 	defer conn.Close()
+	if c, ok := conn.(net.Conn); ok {
+		if err := c.SetWriteDeadline(time.Now().Add(decryptCloseTimeout)); err != nil {
+			return err
+		}
+	}
 	_, err := conn.Write([]byte{0, 0, 0, 0, 0})
 	return err
 }

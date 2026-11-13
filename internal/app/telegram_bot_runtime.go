@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sharedstorage "github.com/wuuduf/applemusic-telegram-bot/internal/storage"
+	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/structs"
 )
 
@@ -38,7 +39,7 @@ func runTelegramBot(appleToken string) {
 		botToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	}
 	if botToken == "" {
-		fmt.Println("telegram-bot-token is not set. Add it to config.yaml or TELEGRAM_BOT_TOKEN.")
+		logWarnf("telegram-bot-token is not set. Add it to config.yaml or TELEGRAM_BOT_TOKEN.")
 		return
 	}
 	sharedstorage.ApplyTelegramStorageOverrides(&Config)
@@ -47,11 +48,16 @@ func runTelegramBot(appleToken string) {
 	defer stopSignal()
 
 	for {
+		// The Apple web token expires; each runtime (daily restart included)
+		// starts from the current one instead of the token read at launch.
+		if fresh, err := ampapi.GetToken(); err == nil && strings.TrimSpace(fresh) != "" {
+			appleToken = fresh
+		}
 		bot := newTelegramBot(botToken, appleToken)
 		setRuntimeErrorLogPath(bot.errorLogFile)
-		fmt.Println("Telegram bot started. Waiting for updates...")
-		fmt.Printf("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)\n", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
-		fmt.Printf("Telegram runtime error log: %s\n", bot.errorLogFile)
+		logInfof("Telegram bot started. Waiting for updates...")
+		logInfof("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)
+		logInfof("Telegram runtime error log: %s", bot.errorLogFile)
 
 		dailyRestartEnabled := telegramDailyRestartEnabled()
 		var restartTimer *time.Timer
@@ -64,9 +70,9 @@ func runTelegramBot(appleToken string) {
 			}
 			restartTimer = time.NewTimer(untilRestart)
 			restartCh = restartTimer.C
-			fmt.Printf("Telegram daily auto-restart scheduled at %s\n", restartAt.Format(time.RFC3339))
+			logInfof("Telegram daily auto-restart scheduled at %s", restartAt.Format(time.RFC3339))
 		} else {
-			fmt.Println("Telegram daily auto-restart disabled by config.")
+			logInfof("Telegram daily auto-restart disabled by config.")
 		}
 
 		loopDone := make(chan struct{})
@@ -82,13 +88,13 @@ func runTelegramBot(appleToken string) {
 			select {
 			case <-signalCtx.Done():
 				reason = "signal"
-				fmt.Println("Telegram bot shutdown requested.")
+				logInfof("Telegram bot shutdown requested.")
 				break waitLoop
 			case <-restartCh:
 				load := bot.dailyRestartTaskLoad()
 				if load.hasPendingWork() {
 					dailyRestartDeferred = true
-					fmt.Printf("Telegram daily auto-restart deferred for %s because tasks are still active (%s)\n", defaultTelegramDailyRestartDeferCheck, load)
+					logWarnf("Telegram daily auto-restart deferred for %s because tasks are still active (%s)", defaultTelegramDailyRestartDeferCheck, load)
 					if restartTimer != nil {
 						restartTimer.Reset(defaultTelegramDailyRestartDeferCheck)
 						restartCh = restartTimer.C
@@ -97,9 +103,9 @@ func runTelegramBot(appleToken string) {
 				}
 				reason = "daily-restart"
 				if dailyRestartDeferred {
-					fmt.Println("Telegram daily auto-restart triggered after active tasks drained.")
+					logInfof("Telegram daily auto-restart triggered after active tasks drained.")
 				} else {
-					fmt.Println("Telegram daily auto-restart triggered.")
+					logInfof("Telegram daily auto-restart triggered.")
 				}
 				break waitLoop
 			case <-loopDone:
@@ -107,7 +113,7 @@ func runTelegramBot(appleToken string) {
 					reason = "shutdown"
 				} else {
 					reason = "loop-exit"
-					fmt.Println("Telegram loop stopped unexpectedly. Restarting bot runtime.")
+					logWarnf("Telegram loop stopped unexpectedly. Restarting bot runtime.")
 				}
 				break waitLoop
 			}
@@ -127,12 +133,10 @@ func runTelegramBot(appleToken string) {
 		select {
 		case <-loopDone:
 		case <-time.After(5 * time.Second):
-			fmt.Println("Telegram bot shutdown timed out waiting for polling loop to stop.")
-			appendRuntimeErrorLog("telegram bot shutdown timed out waiting for polling loop to stop")
+			logErrorf("telegram bot shutdown timed out waiting for polling loop to stop")
 		}
 		if !bot.waitBackgroundTasks(defaultTelegramBackgroundTaskWait) {
-			fmt.Println("Telegram bot shutdown timed out waiting for background tasks to stop.")
-			appendRuntimeErrorLog("telegram bot shutdown timed out waiting for background tasks to stop")
+			logErrorf("telegram bot shutdown timed out waiting for background tasks to stop")
 		}
 
 		bot.stopDownloadWorkers()
@@ -159,9 +163,9 @@ func runTelegramBot(appleToken string) {
 		case "daily-restart":
 			continue
 		case "shutdown":
-			appendRuntimeErrorLog("telegram bot loop stopped after shutdown request; restarting runtime")
+			logErrorf("telegram bot loop stopped after shutdown request; restarting runtime")
 		default:
-			appendRuntimeErrorLog("telegram bot loop stopped unexpectedly; restarting runtime")
+			logErrorf("telegram bot loop stopped unexpectedly; restarting runtime")
 		}
 		select {
 		case <-signalCtx.Done():
@@ -183,14 +187,14 @@ func configureTelegramTempDir(cfg *structs.ConfigSet) {
 	if explicitTmp != "" {
 		clean := filepath.Clean(explicitTmp)
 		if err := os.MkdirAll(clean, 0755); err != nil {
-			fmt.Printf("Failed to prepare temp dir %s: %v\n", clean, err)
+			logWarnf("Failed to prepare temp dir %s: %v", clean, err)
 			return
 		}
 		_ = os.Setenv("AMDL_TMPDIR", clean)
 		if strings.TrimSpace(os.Getenv("TMPDIR")) == "" {
 			_ = os.Setenv("TMPDIR", clean)
 		}
-		fmt.Printf("Telegram temp dir: %s (from environment)\n", clean)
+		logInfof("Telegram temp dir: %s (from environment)", clean)
 		return
 	}
 
@@ -206,12 +210,12 @@ func configureTelegramTempDir(cfg *structs.ConfigSet) {
 	}
 	tmpDir := filepath.Join(cleanBase, ".tmp")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		fmt.Printf("Failed to create telegram temp dir %s: %v\n", tmpDir, err)
+		logWarnf("Failed to create telegram temp dir %s: %v", tmpDir, err)
 		return
 	}
 	_ = os.Setenv("AMDL_TMPDIR", tmpDir)
 	_ = os.Setenv("TMPDIR", tmpDir)
-	fmt.Printf("Telegram temp dir: %s\n", tmpDir)
+	logInfof("Telegram temp dir: %s", tmpDir)
 }
 
 func resolveTelegramTempBaseDir(cfg *structs.ConfigSet) string {
@@ -242,8 +246,7 @@ func panicErrorWithStack(scope string, rec any) error {
 
 func logRecoveredPanic(scope string, rec any) error {
 	err := panicErrorWithStack(scope, rec)
-	fmt.Println(err.Error())
-	appendRuntimeErrorLog(err.Error())
+	logErrorf("%s", err.Error())
 	return err
 }
 
@@ -278,8 +281,7 @@ func (b *TelegramBot) loopWithAutoRestart() {
 		if b.isShuttingDown() {
 			return
 		}
-		fmt.Printf("telegram loop recovered from panic, restarting in %s\n", defaultTelegramLoopRestartDelay)
-		appendRuntimeErrorLogf("telegram loop recovered from panic; restarting in %s", defaultTelegramLoopRestartDelay)
+		logErrorf("telegram loop recovered from panic; restarting in %s", defaultTelegramLoopRestartDelay)
 		closeHTTPIdleConnections(b.pollClient)
 		closeHTTPIdleConnections(b.client)
 		select {

@@ -95,8 +95,7 @@ func (b *TelegramBot) loadCache() {
 	if b.store != nil {
 		audio, docs, videos, err := b.store.loadCache()
 		if err != nil {
-			fmt.Printf("telegram cache load failed (%s): %v\n", b.store.path, err)
-			appendRuntimeErrorLogf("telegram cache load failed (%s): %v", b.store.path, err)
+			logErrorf("telegram cache load failed (%s): %v", b.store.path, err)
 		}
 		b.cache, b.docCache, b.videoCache = audio, docs, videos
 		return
@@ -266,8 +265,7 @@ func (b *TelegramBot) restoreCacheChangesLocked(changes []cacheChange) {
 }
 
 func (b *TelegramBot) logCacheStoreError(err error) {
-	fmt.Printf("telegram cache save failed (%s, sqlite): %v\n", b.store.path, err)
-	appendRuntimeErrorLogf("telegram cache save failed (%s, sqlite): %v", b.store.path, err)
+	logErrorf("telegram cache save failed (%s, sqlite): %v", b.store.path, err)
 }
 
 // snapshotCacheLocked copies the cache for persistence. Caller holds cacheMu.
@@ -292,13 +290,11 @@ func (b *TelegramBot) writeCacheSnapshot(payload telegramCacheFile, seq uint64) 
 	target := filepath.Clean(strings.TrimSpace(b.cacheFile))
 	data, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Printf("telegram cache save failed (%s, marshal): %v\n", target, err)
-		appendRuntimeErrorLogf("telegram cache save failed (%s, marshal): %v", target, err)
+		logErrorf("telegram cache save failed (%s, marshal): %v", target, err)
 		return
 	}
 	if err := atomicWriteTelegramCacheFile(target, data); err != nil {
-		fmt.Printf("telegram cache save failed (%s, atomic write): %v\n", target, err)
-		appendRuntimeErrorLogf("telegram cache save failed (%s, atomic write): %v", target, err)
+		logErrorf("telegram cache save failed (%s, atomic write): %v", target, err)
 		return
 	}
 	b.cacheWrittenSeq = seq

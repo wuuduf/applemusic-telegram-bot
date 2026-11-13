@@ -218,6 +218,12 @@ type TelegramBot struct {
 	workerWG       sync.WaitGroup
 	queueCloseOnce sync.Once
 	queueClosed    bool // guarded by queueMu; set when downloadQueue is closed
+	// Tickets keep task start order equal to queue order. queuePopMu makes
+	// dequeue + numbering atomic; the rest is guarded by queueMu.
+	queuePopMu       sync.Mutex
+	queueTicketSeq   uint64
+	queueNextTicket  uint64
+	queueDoneTickets map[uint64]struct{}
 
 	downloadCoreMu sync.Mutex
 
@@ -457,34 +463,6 @@ type apiResponseParameters struct {
 
 type apiResponse struct {
 	OK          bool                  `json:"ok"`
-	Description string                `json:"description,omitempty"`
-	Parameters  apiResponseParameters `json:"parameters,omitempty"`
-}
-
-type sendMessageResponse struct {
-	OK          bool                  `json:"ok"`
-	Result      Message               `json:"result"`
-	Description string                `json:"description,omitempty"`
-	Parameters  apiResponseParameters `json:"parameters,omitempty"`
-}
-
-type sendAudioResponse struct {
-	OK          bool                  `json:"ok"`
-	Result      AudioMessage          `json:"result"`
-	Description string                `json:"description,omitempty"`
-	Parameters  apiResponseParameters `json:"parameters,omitempty"`
-}
-
-type sendDocumentResponse struct {
-	OK          bool                  `json:"ok"`
-	Result      DocumentMessage       `json:"result"`
-	Description string                `json:"description,omitempty"`
-	Parameters  apiResponseParameters `json:"parameters,omitempty"`
-}
-
-type sendVideoResponse struct {
-	OK          bool                  `json:"ok"`
-	Result      VideoMessage          `json:"result"`
 	Description string                `json:"description,omitempty"`
 	Parameters  apiResponseParameters `json:"parameters,omitempty"`
 }

@@ -2,6 +2,7 @@ package runv2
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,7 @@ func TestDownloadAndDecryptFileRemovesIncompleteOutputOnError(t *testing.T) {
 	outfile := filepath.Join(t.TempDir(), "track.m4a")
 
 	err := downloadAndDecryptFile(
+		context.Background(),
 		bytes.NewBuffer(nil),
 		bytes.NewReader(nil),
 		outfile,

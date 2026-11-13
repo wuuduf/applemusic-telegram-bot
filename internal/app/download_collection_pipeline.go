@@ -101,6 +101,129 @@ func resolveDownloadRootStage(cfg *structs.ConfigSet, session *DownloadSession, 
 	return filepath.Join(root, forbiddenNames.ReplaceAllString(strings.TrimSpace(artistFolderName), "_"))
 }
 
+// cleanFolderNameStage finishes a templated folder name: a name ending in a
+// dot loses all its dots (such names are invalid on Windows), then
+// surrounding whitespace is trimmed.
+func cleanFolderNameStage(name string) string {
+	if strings.HasSuffix(name, ".") {
+		name = strings.ReplaceAll(name, ".", "")
+	}
+	return strings.TrimSpace(name)
+}
+
+// prepareArtistFolderStage renders the artist folder name from
+// artist-folder-format, creates the folder under the codec's save root and
+// returns its path. artistName is used as given (callers apply the length
+// limit where it applies).
+func prepareArtistFolderStage(cfg *structs.ConfigSet, session *DownloadSession, artistName string, artistID string) string {
+	folderName := ""
+	if cfg.ArtistFolderFormat != "" {
+		folderName = cleanFolderNameStage(strings.NewReplacer(
+			"{UrlArtistName}", artistName,
+			"{ArtistName}", artistName,
+			"{ArtistId}", artistID,
+		).Replace(cfg.ArtistFolderFormat))
+		fmt.Println(folderName)
+	}
+	folder := resolveDownloadRootStage(cfg, session, folderName)
+	_ = os.MkdirAll(folder, 0o755)
+	return folder
+}
+
+// buildFolderTagStage joins the configured {Tag} parts of a collection
+// folder: the Apple Digital Master marker and the explicit/clean marker.
+func buildFolderTagStage(cfg *structs.ConfigSet, appleMaster bool, contentRating string) string {
+	tagParts := []string{}
+	if appleMaster && cfg.AppleMasterChoice != "" {
+		tagParts = append(tagParts, cfg.AppleMasterChoice)
+	}
+	if contentRating == "explicit" && cfg.ExplicitChoice != "" {
+		tagParts = append(tagParts, cfg.ExplicitChoice)
+	}
+	if contentRating == "clean" && cfg.CleanChoice != "" {
+		tagParts = append(tagParts, cfg.CleanChoice)
+	}
+	return strings.Join(tagParts, " ")
+}
+
+// prepareCollectionFolderStage renders a collection folder name from format
+// with the given placeholder/value pairs, creates it under parent and
+// returns the display name and the path.
+func prepareCollectionFolderStage(parent string, format string, placeholders ...string) (name string, path string) {
+	name = cleanFolderNameStage(strings.NewReplacer(placeholders...).Replace(format))
+	path = filepath.Join(parent, forbiddenNames.ReplaceAllString(name, "_"))
+	_ = os.MkdirAll(path, 0o755)
+	fmt.Println(name)
+	return name, path
+}
+
+// albumFolderFields are the placeholder values of album-folder-format.
+type albumFolderFields struct {
+	ReleaseDate, ReleaseYear string
+	ArtistName, AlbumName    string
+	UPC, RecordLabel         string
+	Copyright, AlbumID       string
+	Quality, Codec, Tag      string
+}
+
+func prepareAlbumFolderStage(cfg *structs.ConfigSet, parent string, f albumFolderFields) (name string, path string) {
+	return prepareCollectionFolderStage(parent, cfg.AlbumFolderFormat,
+		"{ReleaseDate}", f.ReleaseDate,
+		"{ReleaseYear}", f.ReleaseYear,
+		"{ArtistName}", f.ArtistName,
+		"{AlbumName}", f.AlbumName,
+		"{UPC}", f.UPC,
+		"{RecordLabel}", f.RecordLabel,
+		"{Copyright}", f.Copyright,
+		"{AlbumId}", f.AlbumID,
+		"{Quality}", f.Quality,
+		"{Codec}", f.Codec,
+		"{Tag}", f.Tag,
+	)
+}
+
+// playlistFolderFields are the placeholder values of playlist-folder-format.
+type playlistFolderFields struct {
+	ArtistName, PlaylistName, PlaylistID string
+	Quality, Codec, Tag                  string
+}
+
+func preparePlaylistFolderStage(cfg *structs.ConfigSet, parent string, f playlistFolderFields) (name string, path string) {
+	return prepareCollectionFolderStage(parent, cfg.PlaylistFolderFormat,
+		"{ArtistName}", f.ArtistName,
+		"{PlaylistName}", f.PlaylistName,
+		"{PlaylistId}", f.PlaylistID,
+		"{Quality}", f.Quality,
+		"{Codec}", f.Codec,
+		"{Tag}", f.Tag,
+	)
+}
+
+// downloadArtistCoverStage saves the artist image as "folder" in the artist
+// folder when save-artist-cover is on and an artwork URL is known.
+func downloadArtistCoverStage(cfg *structs.ConfigSet, artistFolder string, artworkURL string) {
+	if !cfg.SaveArtistCover || artworkURL == "" {
+		return
+	}
+	if _, err := writeCoverWithConfig(artistFolder, "folder", artworkURL, cfg); err != nil {
+		fmt.Println("Failed to write artist cover.")
+	}
+}
+
+// downloadStaticCoverStage saves the collection cover into folderPath and
+// returns its path, or "" when static covers are disabled for the session.
+func downloadStaticCoverStage(cfg *structs.ConfigSet, session *DownloadSession, folderPath string, artworkURL string) string {
+	if !session.shouldDownloadStaticCover() {
+		fmt.Println("Static cover download disabled by settings.")
+		return ""
+	}
+	coverPath, err := writeCoverWithConfig(folderPath, "cover", artworkURL, cfg)
+	if err != nil {
+		fmt.Println("Failed to write cover.")
+	}
+	return coverPath
+}
+
 func assignTrackWorkspaceStage(tracks []task.Track, saveDir string, coverPath string, codec string) {
 	for i := range tracks {
 		tracks[i].CoverPath = coverPath
@@ -176,7 +299,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	squarePath := filepath.Join(folderPath, "square_animated_artwork.mp4")
 	squareReady := false
 	if squareSource != "" {
-		motionvideoURLSquare, err := extractVideoWithPreference(squareSource, *cfg, videoAspectSquare)
+		motionvideoURLSquare, err := extractVideoWithPreferenceContext(session.downloadContext(), squareSource, *cfg, videoAspectSquare)
 		if err != nil {
 			fmt.Println("no motion video square.\n", err)
 		} else {
@@ -215,7 +338,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	if tallSource == "" {
 		return
 	}
-	motionvideoURLTall, err := extractVideoWithPreference(tallSource, *cfg, videoAspectPortrait)
+	motionvideoURLTall, err := extractVideoWithPreferenceContext(session.downloadContext(), tallSource, *cfg, videoAspectPortrait)
 	if err != nil {
 		fmt.Println("no motion video tall.\n", err)
 		return
@@ -292,49 +415,19 @@ func resolveStationMediaStage(session *DownloadSession, stationID string, token 
 }
 
 func prepareStationWorkspaceStage(ctx *stationDownloadContext) {
-	singerFolderName := ""
-	if ctx.cfg.ArtistFolderFormat != "" {
-		singerFolderName = strings.NewReplacer(
-			"{ArtistName}", "Apple Music Station",
-			"{ArtistId}", "",
-			"{UrlArtistName}", "Apple Music Station",
-		).Replace(ctx.cfg.ArtistFolderFormat)
-		if strings.HasSuffix(singerFolderName, ".") {
-			singerFolderName = strings.ReplaceAll(singerFolderName, ".", "")
-		}
-		singerFolderName = strings.TrimSpace(singerFolderName)
-		fmt.Println(singerFolderName)
-	}
-	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, 0o755)
+	const artistName = "Apple Music Station"
+	ctx.singerFolder = prepareArtistFolderStage(ctx.cfg, ctx.session, artistName, "")
 	ctx.station.SaveDir = ctx.singerFolder
 
-	ctx.playlistFolder = strings.NewReplacer(
-		"{ArtistName}", "Apple Music Station",
-		"{PlaylistName}", LimitStringWithConfig(ctx.cfg, ctx.station.Name),
-		"{PlaylistId}", ctx.station.ID,
-		"{Quality}", "",
-		"{Codec}", ctx.codec,
-		"{Tag}", "",
-	).Replace(ctx.cfg.PlaylistFolderFormat)
-	if strings.HasSuffix(ctx.playlistFolder, ".") {
-		ctx.playlistFolder = strings.ReplaceAll(ctx.playlistFolder, ".", "")
-	}
-	ctx.playlistFolder = strings.TrimSpace(ctx.playlistFolder)
-	ctx.playlistPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.playlistFolder, "_"))
-	_ = os.MkdirAll(ctx.playlistPath, 0o755)
+	ctx.playlistFolder, ctx.playlistPath = preparePlaylistFolderStage(ctx.cfg, ctx.singerFolder, playlistFolderFields{
+		ArtistName:   artistName,
+		PlaylistName: LimitStringWithConfig(ctx.cfg, ctx.station.Name),
+		PlaylistID:   ctx.station.ID,
+		Codec:        ctx.codec,
+	})
 	ctx.station.SaveName = ctx.playlistFolder
-	fmt.Println(ctx.playlistFolder)
 
-	if ctx.session.shouldDownloadStaticCover() {
-		covPath, err := writeCoverWithConfig(ctx.playlistPath, "cover", ctx.stationData.Attributes.Artwork.URL, ctx.cfg)
-		if err != nil {
-			fmt.Println("Failed to write cover.")
-		}
-		ctx.coverPath = covPath
-	} else {
-		fmt.Println("Static cover download disabled by settings.")
-	}
+	ctx.coverPath = downloadStaticCoverStage(ctx.cfg, ctx.session, ctx.playlistPath, ctx.stationData.Attributes.Artwork.URL)
 	ctx.station.CoverPath = ctx.coverPath
 
 	if ctx.cfg.SaveAnimatedArtwork {
@@ -532,79 +625,35 @@ func renderAlbumDebugStage(ctx *albumDownloadContext) error {
 }
 
 func prepareAlbumWorkspaceStage(ctx *albumDownloadContext) {
-	artistID := ""
+	attrs := &ctx.albumData.Attributes
+	artistID, artistArtworkURL := "", ""
 	if artistRef, artistErr := safe.FirstRef("download.prepareAlbumWorkspace", "album.data[0].relationships.artists.data", ctx.albumData.Relationships.Artists.Data); artistErr == nil {
 		artistID = artistRef.ID
+		artistArtworkURL = artistRef.Attributes.Artwork.Url
 	}
-	singerFolderName := ""
-	if ctx.cfg.ArtistFolderFormat != "" {
-		singerFolderName = strings.NewReplacer(
-			"{UrlArtistName}", LimitStringWithConfig(ctx.cfg, ctx.albumData.Attributes.ArtistName),
-			"{ArtistName}", LimitStringWithConfig(ctx.cfg, ctx.albumData.Attributes.ArtistName),
-			"{ArtistId}", artistID,
-		).Replace(ctx.cfg.ArtistFolderFormat)
-		if strings.HasSuffix(singerFolderName, ".") {
-			singerFolderName = strings.ReplaceAll(singerFolderName, ".", "")
-		}
-		singerFolderName = strings.TrimSpace(singerFolderName)
-		fmt.Println(singerFolderName)
-	}
-	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, 0o755)
+	artistName := LimitStringWithConfig(ctx.cfg, attrs.ArtistName)
+	ctx.singerFolder = prepareArtistFolderStage(ctx.cfg, ctx.session, artistName, artistID)
 	ctx.album.SaveDir = ctx.singerFolder
 
-	tagParts := []string{}
-	if ctx.albumData.Attributes.IsAppleDigitalMaster || ctx.albumData.Attributes.IsMasteredForItunes {
-		if ctx.cfg.AppleMasterChoice != "" {
-			tagParts = append(tagParts, ctx.cfg.AppleMasterChoice)
-		}
-	}
-	if ctx.albumData.Attributes.ContentRating == "explicit" && ctx.cfg.ExplicitChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.ExplicitChoice)
-	}
-	if ctx.albumData.Attributes.ContentRating == "clean" && ctx.cfg.CleanChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.CleanChoice)
-	}
-	ctx.albumFolder = strings.NewReplacer(
-		"{ReleaseDate}", ctx.albumData.Attributes.ReleaseDate,
-		"{ReleaseYear}", ctx.releaseYear,
-		"{ArtistName}", LimitStringWithConfig(ctx.cfg, ctx.albumData.Attributes.ArtistName),
-		"{AlbumName}", LimitStringWithConfig(ctx.cfg, ctx.albumData.Attributes.Name),
-		"{UPC}", ctx.albumData.Attributes.Upc,
-		"{RecordLabel}", ctx.albumData.Attributes.RecordLabel,
-		"{Copyright}", ctx.albumData.Attributes.Copyright,
-		"{AlbumId}", ctx.albumID,
-		"{Quality}", ctx.quality,
-		"{Codec}", ctx.codec,
-		"{Tag}", strings.Join(tagParts, " "),
-	).Replace(ctx.cfg.AlbumFolderFormat)
-	if strings.HasSuffix(ctx.albumFolder, ".") {
-		ctx.albumFolder = strings.ReplaceAll(ctx.albumFolder, ".", "")
-	}
-	ctx.albumFolder = strings.TrimSpace(ctx.albumFolder)
-	ctx.albumFolderPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.albumFolder, "_"))
-	_ = os.MkdirAll(ctx.albumFolderPath, 0o755)
+	ctx.albumFolder, ctx.albumFolderPath = prepareAlbumFolderStage(ctx.cfg, ctx.singerFolder, albumFolderFields{
+		ReleaseDate: attrs.ReleaseDate,
+		ReleaseYear: ctx.releaseYear,
+		ArtistName:  artistName,
+		AlbumName:   LimitStringWithConfig(ctx.cfg, attrs.Name),
+		UPC:         attrs.Upc,
+		RecordLabel: attrs.RecordLabel,
+		Copyright:   attrs.Copyright,
+		AlbumID:     ctx.albumID,
+		Quality:     ctx.quality,
+		Codec:       ctx.codec,
+		Tag:         buildFolderTagStage(ctx.cfg, attrs.IsAppleDigitalMaster || attrs.IsMasteredForItunes, attrs.ContentRating),
+	})
 	ctx.album.SaveName = ctx.albumFolder
-	fmt.Println(ctx.albumFolder)
 
-	if ctx.cfg.SaveArtistCover {
-		if artistRef, artistErr := safe.FirstRef("download.prepareAlbumWorkspace", "album.data[0].relationships.artists.data", ctx.albumData.Relationships.Artists.Data); artistErr == nil && artistRef.Attributes.Artwork.Url != "" {
-			if _, err := writeCoverWithConfig(ctx.singerFolder, "folder", artistRef.Attributes.Artwork.Url, ctx.cfg); err != nil {
-				fmt.Println("Failed to write artist cover.")
-			}
-		}
-	}
-	if ctx.session.shouldDownloadStaticCover() {
-		covPath, err := writeCoverWithConfig(ctx.albumFolderPath, "cover", ctx.albumData.Attributes.Artwork.URL, ctx.cfg)
-		if err != nil {
-			fmt.Println("Failed to write cover.")
-		}
-		ctx.coverPath = covPath
-	} else {
-		fmt.Println("Static cover download disabled by settings.")
-	}
+	downloadArtistCoverStage(ctx.cfg, ctx.singerFolder, artistArtworkURL)
+	ctx.coverPath = downloadStaticCoverStage(ctx.cfg, ctx.session, ctx.albumFolderPath, attrs.Artwork.URL)
 	if ctx.cfg.SaveAnimatedArtwork {
-		prepareAnimatedArtworkStage(ctx.session, ctx.albumFolderPath, ctx.albumData.Attributes.EditorialVideo.MotionDetailSquare.Video, ctx.albumData.Attributes.EditorialVideo.MotionDetailTall.Video, "Animated artwork not available for this album.")
+		prepareAnimatedArtworkStage(ctx.session, ctx.albumFolderPath, attrs.EditorialVideo.MotionDetailSquare.Video, attrs.EditorialVideo.MotionDetailTall.Video, "Animated artwork not available for this album.")
 	}
 
 	assignTrackWorkspaceStage(ctx.album.Tracks, ctx.albumFolderPath, ctx.coverPath, ctx.codec)
@@ -721,65 +770,26 @@ func renderPlaylistDebugStage(ctx *playlistDownloadContext) error {
 }
 
 func preparePlaylistWorkspaceStage(ctx *playlistDownloadContext) {
-	singerFolderName := ""
-	if ctx.cfg.ArtistFolderFormat != "" {
-		singerFolderName = strings.NewReplacer(
-			"{ArtistName}", "Apple Music",
-			"{ArtistId}", "",
-			"{UrlArtistName}", "Apple Music",
-		).Replace(ctx.cfg.ArtistFolderFormat)
-		if strings.HasSuffix(singerFolderName, ".") {
-			singerFolderName = strings.ReplaceAll(singerFolderName, ".", "")
-		}
-		singerFolderName = strings.TrimSpace(singerFolderName)
-		fmt.Println(singerFolderName)
-	}
-	ctx.singerFolder = resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(ctx.singerFolder, 0o755)
+	const artistName = "Apple Music"
+	attrs := &ctx.playlistData.Attributes
+	ctx.singerFolder = prepareArtistFolderStage(ctx.cfg, ctx.session, artistName, "")
 	ctx.playlist.SaveDir = ctx.singerFolder
 
-	tagParts := []string{}
-	if ctx.playlistData.Attributes.IsAppleDigitalMaster || ctx.playlistData.Attributes.IsMasteredForItunes {
-		if ctx.cfg.AppleMasterChoice != "" {
-			tagParts = append(tagParts, ctx.cfg.AppleMasterChoice)
-		}
-	}
-	if ctx.playlistData.Attributes.ContentRating == "explicit" && ctx.cfg.ExplicitChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.ExplicitChoice)
-	}
-	if ctx.playlistData.Attributes.ContentRating == "clean" && ctx.cfg.CleanChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.CleanChoice)
-	}
-	ctx.playlistFolder = strings.NewReplacer(
-		"{ArtistName}", "Apple Music",
-		"{PlaylistName}", LimitStringWithConfig(ctx.cfg, ctx.playlistData.Attributes.Name),
-		"{PlaylistId}", ctx.playlistID,
-		"{Quality}", ctx.quality,
-		"{Codec}", ctx.codec,
-		"{Tag}", strings.Join(tagParts, " "),
-	).Replace(ctx.cfg.PlaylistFolderFormat)
-	if strings.HasSuffix(ctx.playlistFolder, ".") {
-		ctx.playlistFolder = strings.ReplaceAll(ctx.playlistFolder, ".", "")
-	}
-	ctx.playlistFolder = strings.TrimSpace(ctx.playlistFolder)
-	ctx.playlistPath = filepath.Join(ctx.singerFolder, forbiddenNames.ReplaceAllString(ctx.playlistFolder, "_"))
-	_ = os.MkdirAll(ctx.playlistPath, 0o755)
+	ctx.playlistFolder, ctx.playlistPath = preparePlaylistFolderStage(ctx.cfg, ctx.singerFolder, playlistFolderFields{
+		ArtistName:   artistName,
+		PlaylistName: LimitStringWithConfig(ctx.cfg, attrs.Name),
+		PlaylistID:   ctx.playlistID,
+		Quality:      ctx.quality,
+		Codec:        ctx.codec,
+		Tag:          buildFolderTagStage(ctx.cfg, attrs.IsAppleDigitalMaster || attrs.IsMasteredForItunes, attrs.ContentRating),
+	})
 	ctx.playlist.SaveName = ctx.playlistFolder
-	fmt.Println(ctx.playlistFolder)
 
-	if ctx.session.shouldDownloadStaticCover() {
-		covPath, err := writeCoverWithConfig(ctx.playlistPath, "cover", ctx.playlistData.Attributes.Artwork.URL, ctx.cfg)
-		if err != nil {
-			fmt.Println("Failed to write cover.")
-		}
-		ctx.coverPath = covPath
-	} else {
-		fmt.Println("Static cover download disabled by settings.")
-	}
+	ctx.coverPath = downloadStaticCoverStage(ctx.cfg, ctx.session, ctx.playlistPath, attrs.Artwork.URL)
 	assignTrackWorkspaceStage(ctx.playlist.Tracks, ctx.playlistPath, ctx.coverPath, ctx.codec)
 
 	if ctx.cfg.SaveAnimatedArtwork {
-		prepareAnimatedArtworkStage(ctx.session, ctx.playlistPath, ctx.playlistData.Attributes.EditorialVideo.MotionDetailSquare.Video, ctx.playlistData.Attributes.EditorialVideo.MotionDetailTall.Video, "Animated artwork not available for this playlist.")
+		prepareAnimatedArtworkStage(ctx.session, ctx.playlistPath, attrs.EditorialVideo.MotionDetailSquare.Video, attrs.EditorialVideo.MotionDetailTall.Video, "Animated artwork not available for this playlist.")
 	}
 }
 
@@ -878,76 +888,32 @@ func prepareSongWorkspaceStage(ctx *songDownloadContext) {
 	if err != nil {
 		releaseYear = ""
 	}
-	artistID := albumData.ArtistID
-	singerFolderName := ""
-	if ctx.cfg.ArtistFolderFormat != "" {
-		singerFolderName = strings.NewReplacer(
-			"{UrlArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
-			"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
-			"{ArtistId}", artistID,
-		).Replace(ctx.cfg.ArtistFolderFormat)
-		if strings.HasSuffix(singerFolderName, ".") {
-			singerFolderName = strings.ReplaceAll(singerFolderName, ".", "")
-		}
-		singerFolderName = strings.TrimSpace(singerFolderName)
-		fmt.Println(singerFolderName)
-	}
-	singerFolder := resolveDownloadRootStage(ctx.cfg, ctx.session, singerFolderName)
-	_ = os.MkdirAll(singerFolder, 0o755)
+	artistName := LimitStringWithConfig(ctx.cfg, albumData.ArtistName)
+	singerFolder := prepareArtistFolderStage(ctx.cfg, ctx.session, artistName, albumData.ArtistID)
 
 	quality := ""
 	if strings.Contains(ctx.cfg.AlbumFolderFormat, "Quality") {
 		quality, ctx.codec = resolveCollectionQualityStage(ctx.session, ctx.storefront, ctx.cfg.Language, ctx.token, "album", ctx.songID, ctx.track.Resp.Attributes.AudioTraits)
 	}
-	tagParts := []string{}
-	if albumData.IsAppleDigitalMaster || albumData.IsMasteredForItunes {
-		if ctx.cfg.AppleMasterChoice != "" {
-			tagParts = append(tagParts, ctx.cfg.AppleMasterChoice)
-		}
-	}
-	if albumData.ContentRating == "explicit" && ctx.cfg.ExplicitChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.ExplicitChoice)
-	}
-	if albumData.ContentRating == "clean" && ctx.cfg.CleanChoice != "" {
-		tagParts = append(tagParts, ctx.cfg.CleanChoice)
-	}
-	albumFolder := strings.NewReplacer(
-		"{ReleaseDate}", albumData.ReleaseDate,
-		"{ReleaseYear}", releaseYear,
-		"{ArtistName}", LimitStringWithConfig(ctx.cfg, albumData.ArtistName),
-		"{AlbumName}", LimitStringWithConfig(ctx.cfg, albumData.Name),
-		"{UPC}", albumData.Upc,
-		"{RecordLabel}", albumData.RecordLabel,
-		"{Copyright}", albumData.Copyright,
-		"{AlbumId}", ctx.track.PreID,
-		"{Quality}", quality,
-		"{Codec}", ctx.codec,
-		"{Tag}", strings.Join(tagParts, " "),
-	).Replace(ctx.cfg.AlbumFolderFormat)
-	if strings.HasSuffix(albumFolder, ".") {
-		albumFolder = strings.ReplaceAll(albumFolder, ".", "")
-	}
-	albumFolder = strings.TrimSpace(albumFolder)
-	albumFolderPath := filepath.Join(singerFolder, forbiddenNames.ReplaceAllString(albumFolder, "_"))
-	_ = os.MkdirAll(albumFolderPath, 0o755)
-	fmt.Println(albumFolder)
+	_, albumFolderPath := prepareAlbumFolderStage(ctx.cfg, singerFolder, albumFolderFields{
+		ReleaseDate: albumData.ReleaseDate,
+		ReleaseYear: releaseYear,
+		ArtistName:  artistName,
+		AlbumName:   LimitStringWithConfig(ctx.cfg, albumData.Name),
+		UPC:         albumData.Upc,
+		RecordLabel: albumData.RecordLabel,
+		Copyright:   albumData.Copyright,
+		AlbumID:     ctx.track.PreID,
+		Quality:     quality,
+		Codec:       ctx.codec,
+		Tag:         buildFolderTagStage(ctx.cfg, albumData.IsAppleDigitalMaster || albumData.IsMasteredForItunes, albumData.ContentRating),
+	})
 
-	if ctx.cfg.SaveArtistCover {
-		if strings.TrimSpace(albumData.ArtistArtworkURL) != "" {
-			if _, err := writeCoverWithConfig(singerFolder, "folder", albumData.ArtistArtworkURL, ctx.cfg); err != nil {
-				fmt.Println("Failed to write artist cover.")
-			}
-		}
+	// A blank artist artwork URL means there is nothing to download.
+	if strings.TrimSpace(albumData.ArtistArtworkURL) != "" {
+		downloadArtistCoverStage(ctx.cfg, singerFolder, albumData.ArtistArtworkURL)
 	}
-	if ctx.session.shouldDownloadStaticCover() {
-		covPath, err := writeCoverWithConfig(albumFolderPath, "cover", albumData.ArtworkURL, ctx.cfg)
-		if err != nil {
-			fmt.Println("Failed to write cover.")
-		}
-		ctx.coverPath = covPath
-	} else {
-		fmt.Println("Static cover download disabled by settings.")
-	}
+	ctx.coverPath = downloadStaticCoverStage(ctx.cfg, ctx.session, albumFolderPath, albumData.ArtworkURL)
 	if ctx.cfg.SaveAnimatedArtwork {
 		prepareAnimatedArtworkStage(ctx.session, albumFolderPath, albumData.MotionDetailSquareVideo, albumData.MotionDetailTallVideo, "Animated artwork not available for this album.")
 	}

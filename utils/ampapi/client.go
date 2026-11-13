@@ -114,7 +114,10 @@ func doJSONWithRetry(ctx context.Context, providedToken string, out any, reqFact
 		}
 
 		if apiErr.StatusCode == http.StatusUnauthorized && !refreshedToken {
-			freshToken, refreshErr := getTokenWithContext(ctx, true)
+			// Re-scrape Apple only when the rejected token is the cached
+			// one. A caller that still holds an older token just needs the
+			// current cached token, not another homepage fetch per request.
+			freshToken, refreshErr := getTokenWithContext(ctx, isCachedToken(token))
 			if refreshErr != nil {
 				return refreshErr
 			}
@@ -134,6 +137,12 @@ func doJSONWithRetry(ctx context.Context, providedToken string, out any, reqFact
 	}
 
 	return fmt.Errorf("apple music api request exhausted retries")
+}
+
+func isCachedToken(token string) bool {
+	appleMusicTokenCache.mu.Lock()
+	defer appleMusicTokenCache.mu.Unlock()
+	return appleMusicTokenCache.token == "" || appleMusicTokenCache.token == token
 }
 
 func newAPIError(resp *http.Response) (*APIError, error) {

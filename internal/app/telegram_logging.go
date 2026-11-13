@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -81,28 +80,20 @@ func (b *TelegramBot) sanitizeTelegramErr(err error) string {
 	return sanitizeTelegramError(err, b.token)
 }
 
+// logTelegramPrintf logs at Info level. Redaction happens in the log handler;
+// the bot's token is registered here as well so that bots built without
+// newTelegramBot are covered too.
 func (b *TelegramBot) logTelegramPrintf(format string, args ...any) {
-	fmt.Printf(format, sanitizeTelegramLogArgs(func() string {
-		if b == nil {
-			return ""
-		}
-		return b.token
-	}(), args...)...)
-}
-
-func (b *TelegramBot) appendTelegramRuntimeErrorLogf(format string, args ...any) {
-	appendRuntimeErrorLogf(format, sanitizeTelegramLogArgs(func() string {
-		if b == nil {
-			return ""
-		}
-		return b.token
-	}(), args...)...)
+	if b != nil {
+		registerLogSecret(b.token)
+	}
+	logInfof(format, args...)
 }
 
 func warnInsecureTelegramAPIBase(apiBase string) {
 	parsed, err := url.Parse(apiBase)
 	if err != nil {
-		fmt.Printf("Warning: invalid telegram-api-url %q. Falling back to runtime errors if unreachable.\n", apiBase)
+		logWarnf("invalid telegram-api-url %q. Falling back to runtime errors if unreachable.", apiBase)
 		return
 	}
 	if !strings.EqualFold(parsed.Scheme, "http") {
@@ -110,13 +101,13 @@ func warnInsecureTelegramAPIBase(apiBase string) {
 	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host == "localhost" {
-		fmt.Printf("Warning: telegram-api-url uses plain HTTP (%s). Use only trusted local environments.\n", apiBase)
+		logWarnf("telegram-api-url uses plain HTTP (%s). Use only trusted local environments.", apiBase)
 		return
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsLoopback() {
-		fmt.Printf("Warning: telegram-api-url uses plain HTTP (%s). Use only trusted local environments.\n", apiBase)
+		logWarnf("telegram-api-url uses plain HTTP (%s). Use only trusted local environments.", apiBase)
 		return
 	}
-	fmt.Printf("Warning: telegram-api-url uses plain HTTP (%s). Telegram bot token may be exposed in transit.\n", apiBase)
+	logWarnf("telegram-api-url uses plain HTTP (%s). Telegram bot token may be exposed in transit.", apiBase)
 }

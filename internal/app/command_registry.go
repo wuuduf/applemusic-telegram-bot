@@ -1,12 +1,8 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 )
 
@@ -254,37 +250,20 @@ func (b *TelegramBot) syncTelegramCommandMenu(ctx context.Context) {
 			payload["language_code"] = locale.code
 		}
 		if err := b.postTelegramJSON(ctx, "setMyCommands", payload); err != nil {
-			msg := fmt.Sprintf("telegram setMyCommands (%s) failed: %s", locale.lang, b.sanitizeTelegramErr(err))
-			fmt.Println(msg)
-			appendRuntimeErrorLog(msg)
+			logErrorf("telegram setMyCommands (%s) failed: %v", locale.lang, err)
 			return
 		}
 	}
-	fmt.Println("Telegram command menu synced from the command registry.")
+	logInfof("Telegram command menu synced from the command registry.")
 }
 
+// postTelegramJSON calls a Bot API method whose result is not needed.
 func (b *TelegramBot) postTelegramJSON(ctx context.Context, method string, payload any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.apiURL(method), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	apiResp := apiResponse{}
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("%s: HTTP %d: %s", method, resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	if !apiResp.OK {
-		return fmt.Errorf("%s: %s", method, apiResp.Description)
-	}
-	return nil
+	_, err := callTelegramJSON[telegramNoResult](ctx, b, method, payload, func(e *telegramAPIError) string {
+		if !e.Decoded {
+			return fmt.Sprintf("%s: HTTP %d: %s", method, e.StatusCode, e.Body)
+		}
+		return fmt.Sprintf("%s: %s", method, e.Description)
+	})
+	return err
 }

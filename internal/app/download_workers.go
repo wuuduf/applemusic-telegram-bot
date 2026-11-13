@@ -13,16 +13,27 @@ func (b *TelegramBot) startDownloadWorker() {
 		b.workerWG.Add(1)
 		go func() {
 			defer b.workerWG.Done()
-			for req := range b.downloadQueue {
+			for {
+				req, ticket, ok := b.takeQueuedRequest()
+				if !ok {
+					return
+				}
 				if req == nil {
+					b.queueMu.Lock()
+					b.finishQueueTicketLocked(ticket)
+					b.queueMu.Unlock()
 					continue
 				}
 				func() {
 					b.queueMu.Lock()
-					for b.activeWorkers >= b.workerLimit && !b.isRequestCanceled(req.requestID) && !b.isShuttingDown() {
+					// Requests start in the order they were dequeued: a worker
+					// only proceeds when a slot is free and every earlier
+					// ticket has started or been skipped.
+					for (b.activeWorkers >= b.workerLimit || ticket != b.queueNextTicket) && !b.isRequestCanceled(req.requestID) && !b.isShuttingDown() {
 						b.queueCond.Wait()
 					}
 					if b.isShuttingDown() || b.consumeCanceledRequest(req.requestID) {
+						b.finishQueueTicketLocked(ticket)
 						b.queueMu.Unlock()
 						if strings.TrimSpace(req.requestID) != "" {
 							b.untrackRequest(req.requestID)
@@ -33,6 +44,7 @@ func (b *TelegramBot) startDownloadWorker() {
 						return
 					}
 					b.activeWorkers++
+					b.finishQueueTicketLocked(ticket)
 					b.queueMu.Unlock()
 
 					taskType := ""
@@ -103,6 +115,42 @@ func (b *TelegramBot) startDownloadWorker() {
 				}()
 			}
 		}()
+	}
+}
+
+// takeQueuedRequest receives the next request and numbers it. queuePopMu
+// makes receive + numbering atomic, so tickets follow queue order even though
+// several workers pull from the same channel.
+func (b *TelegramBot) takeQueuedRequest() (*downloadRequest, uint64, bool) {
+	b.queuePopMu.Lock()
+	defer b.queuePopMu.Unlock()
+	req, ok := <-b.downloadQueue
+	if !ok {
+		return nil, 0, false
+	}
+	b.queueMu.Lock()
+	ticket := b.queueTicketSeq
+	b.queueTicketSeq++
+	b.queueMu.Unlock()
+	return req, ticket, true
+}
+
+// finishQueueTicketLocked marks a ticket as started or skipped and lets the
+// next waiting one through. Caller holds queueMu.
+func (b *TelegramBot) finishQueueTicketLocked(ticket uint64) {
+	if b.queueDoneTickets == nil {
+		b.queueDoneTickets = make(map[uint64]struct{})
+	}
+	b.queueDoneTickets[ticket] = struct{}{}
+	for {
+		if _, done := b.queueDoneTickets[b.queueNextTicket]; !done {
+			break
+		}
+		delete(b.queueDoneTickets, b.queueNextTicket)
+		b.queueNextTicket++
+	}
+	if b.queueCond != nil {
+		b.queueCond.Broadcast()
 	}
 }
 

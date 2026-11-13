@@ -16,6 +16,18 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- Search results are now charged against the per-user limiter when one is picked. Search commands are free, so search + tap used to start unlimited downloads.
+- **Behavior change:** the global worker limit (`/settings workerN` and the settings-panel buttons) can only be changed by admins (`telegram-admin-user-ids`); previously any allowed user could change it.
+- The wrapper sockets are bounded: the decrypt connection has per-phase deadlines and follows task cancellation, and the device m3u8 lookup has a dial timeout and a 30s deadline. A stalled wrapper could previously block every download.
+- The Apple web token is re-read at each bot runtime start (daily restart included), only unexpired tokens are accepted, and a 401 re-scrapes Apple only when the cached token itself was rejected.
+- `/cancel` now also stops a ZIP upload and manifest fetches in progress.
+- Quota cleanup no longer deletes files a running task still has to upload (ZIP/bundle transfers protect everything they download; one-by-one transfers pin the track being sent).
+- A request that was running during two crashes is dropped on recovery (with a notice to the chat) instead of being re-queued forever.
+- Tasks start in queue order even with several workers; runtime-state saves are debounced (300ms).
+- **Behavior change:** the memory guard (`telegram-max-memory-mb`) now measures the container's anonymous memory (cgroup, includes ffmpeg/MP4Box child processes) or the process RSS instead of the Go heap, so existing thresholds may need raising.
+- Media captions are signed with the running bot's own username (from `getMe`) instead of a hard-coded one; override or disable with `telegram-caption-signature`.
+- Fixed leaks: upload watchdog contexts, a temp file when FLAC compression cannot reach the size limit, and repeated FLAC compression on upload retries. Inline-query and `/id <song>` IDs are validated before use.
+- CI verifies `go.mod`/`go.sum` are tidy for the root module too.
 - Upgrade to Go 1.26.10 (go.mod `go 1.26.0`, CI, both Dockerfiles). Go 1.25 is no longer supported and govulncheck reported 10 standard-library vulnerabilities (net/http, crypto/x509, crypto/tls, net/textproto) that are fixed only in Go 1.26.9+. Also bump `golang.org/x/net` to v0.60.0 in both modules and wrapper-shim's `google.golang.org/grpc` to v1.83.1 (GO-2026-6348, GO-2026-6061). Both modules now scan clean, and CI runs govulncheck for wrapper-shim as well.
 - CI actions upgraded to their Node 24 releases (checkout v7, setup-go v7, upload-artifact v7, docker login/setup-buildx v4, build-push v7, golangci-lint-action v9, action-gh-release v3), removing the Node 20 deprecation warnings before GitHub drops Node 20. None of the removed inputs were in use.
 - Docker CI now always builds the image (and the wrapper-shim image) and only skips the push when logging in to ghcr.io fails, failing with a clear message; pull requests get a build-only check. Previously an expired `GHCR_TOKEN` failed the job before any build, hiding whether the Dockerfile still worked.
@@ -56,6 +68,9 @@ All notable changes to this project will be documented in this file.
 - New tests for safe access, external command runner, zip creation, AstrBot artifact cleanup, and Telegram cleanup tracker behavior.
 
 ### Changed
+- **Log format change:** bot-runtime logging goes through a `log/slog` logger. Console lines are now `<time> <LEVEL> <message>`; the level defaults to `info` and can be set with `AMDL_LOG_LEVEL` (`debug`/`info`/`warn`/`error`). `ERROR` records are also appended to the runtime error log file, whose line format is unchanged. The bot token, Apple Music tokens and the Last.fm `api_key` are redacted centrally in the log handler and in the error log file. The interactive CLI output and per-track download progress still print as before.
+- Bot API calls share one helper (`callTelegramJSON`) that returns a structured error (HTTP status, `error_code`, description, `retry_after`); rate-limit and retry decisions read those fields and parse error text only for errors without structure. Error messages are unchanged. `answerCallbackQuery`, `answerInlineQuery` and `deleteWebhook` now stop with the bot's shutdown context.
+- Album/playlist/station/song workspace setup shares its folder-naming and cover helpers; resulting paths are unchanged.
 - Telegram cache now supports song audio + MV + ZIP bundle `file_id`.
 - Help text and README docs updated to match real bot behavior.
 - CI artifacts and Docker config now use safe default config template.

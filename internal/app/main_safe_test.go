@@ -1706,6 +1706,9 @@ func TestSendAudioFileUsesActualFormatFromMeta(t *testing.T) {
 }
 
 func TestFormatTelegramAudioCaptionIncludesMetadataLines(t *testing.T) {
+	previousSignature := captionSignature()
+	setCaptionSignature("via @test_bot")
+	t.Cleanup(func() { setCaptionSignature(previousSignature) })
 	got := formatTelegramAudioCaption(25_460_000, 852.74, telegramFormatAlac, AudioMeta{
 		Performer:  "Taylor Swift",
 		AlbumName:  "1989 (Taylor’s Version)",
@@ -1723,7 +1726,7 @@ func TestFormatTelegramAudioCaptionIncludesMetadataLines(t *testing.T) {
 	if !strings.Contains(got, "\n风格：Pop / Country Pop\n") {
 		t.Fatalf("expected genre line, got %q", got)
 	}
-	if strings.Count(got, "via @jellyamdl_bot") != 1 {
+	if strings.Count(got, "via @test_bot") != 1 {
 		t.Fatalf("expected single via line, got %q", got)
 	}
 }

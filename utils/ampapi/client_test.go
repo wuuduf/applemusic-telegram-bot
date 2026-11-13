@@ -47,13 +47,14 @@ func TestGetSongRespWithContextRetriesOnServerError(t *testing.T) {
 
 func TestGetSongRespWithContextRefreshesTokenOnUnauthorized(t *testing.T) {
 	resetAMPAPITestState(t)
+	freshToken := tokenFixture(`{"typ":"JWT","alg":"ES256"}`, time.Now().Add(time.Hour))
 
 	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			_, _ = w.Write([]byte(`<html><script src="/assets/index~abc.js"></script></html>`))
 		case "/assets/index~abc.js":
-			_, _ = w.Write([]byte(`window.__TOKEN__="eyJh.fresh-token";`))
+			_, _ = fmt.Fprintf(w, `window.__TOKEN__=%q;`, freshToken)
 		default:
 			http.NotFound(w, r)
 		}
@@ -66,7 +67,7 @@ func TestGetSongRespWithContextRefreshesTokenOnUnauthorized(t *testing.T) {
 		mu.Lock()
 		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
 		mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer eyJh.fresh-token" {
+		if r.Header.Get("Authorization") != "Bearer "+freshToken {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"stale token"}`))
 			return
@@ -93,7 +94,7 @@ func TestGetSongRespWithContextRefreshesTokenOnUnauthorized(t *testing.T) {
 	if authHeaders[0] != "Bearer stale-token" {
 		t.Fatalf("unexpected first authorization header: %q", authHeaders[0])
 	}
-	if authHeaders[1] != "Bearer eyJh.fresh-token" {
+	if authHeaders[1] != "Bearer "+freshToken {
 		t.Fatalf("unexpected refreshed authorization header: %q", authHeaders[1])
 	}
 }
@@ -185,6 +186,7 @@ func ExampleAPIError() {
 
 func TestGetTokenWithContextSharesInflightFetch(t *testing.T) {
 	resetAMPAPITestState(t)
+	freshToken := tokenFixture(`{"alg":"ES256","typ":"JWT"}`, time.Now().Add(time.Hour))
 
 	var fetchCount int32
 	fetchSignal := make(chan struct{})
@@ -202,7 +204,7 @@ func TestGetTokenWithContextSharesInflightFetch(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`<html><script src="/assets/index~abc.js"></script></html>`))
 		case "/assets/index~abc.js":
-			_, _ = w.Write([]byte(`window.__TOKEN__="eyJh.singleflight-token";`))
+			_, _ = fmt.Fprintf(w, `window.__TOKEN__=%q;`, freshToken)
 		default:
 			http.NotFound(w, r)
 		}
@@ -243,7 +245,7 @@ func TestGetTokenWithContextSharesInflightFetch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("caller %d returned error: %v", i, err)
 		}
-		if results[i] != "eyJh.singleflight-token" {
+		if results[i] != freshToken {
 			t.Fatalf("caller %d got token %q, want shared singleflight token", i, results[i])
 		}
 	}

@@ -148,7 +148,12 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 				b.handleURLTarget(chatID, replyToID, target)
 				return
 			}
-			b.queueDownloadSong(chatID, args[0])
+			songID, err := normalizeMediaIdentifier(mediaTypeSong, args[0])
+			if err != nil {
+				_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Skipped invalid song ID(s): %s", args[0]), nil, replyToID)
+				return
+			}
+			b.queueDownloadSongWithReply(chatID, songID, replyToID)
 			return
 		}
 		kind := strings.ToLower(args[0])
@@ -238,6 +243,11 @@ func (b *TelegramBot) handleCommandWithContext(chatID int64, chatType string, us
 				return
 			}
 			if workerLimit, ok := parseTaskWorkerLimit(raw); ok {
+				// The worker limit is global, so only admins may change it.
+				if !b.isAdminUser(userID) {
+					_ = b.sendMessageWithReply(chatID, "只有管理员可以修改任务线程数。", nil, replyToID)
+					return
+				}
 				b.setTaskWorkerLimit(workerLimit)
 				settings = b.getChatSettings(chatID)
 				_ = b.sendMessageWithReply(chatID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings), replyToID)

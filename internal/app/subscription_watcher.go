@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -198,7 +199,7 @@ func (b *TelegramBot) addArtistSubscription(chatID int64, userID int64, target *
 		return telegramSubscription{}, apputils.SearchResultItem{}, false, err
 	}
 	latestAlbum, latestErr := b.fetchLatestArtistAlbum(storefront, artistID)
-	if latestErr != nil && !strings.Contains(strings.ToLower(latestErr.Error()), "no albums found") {
+	if latestErr != nil && !errors.Is(latestErr, errNoArtistAlbums) {
 		return telegramSubscription{}, apputils.SearchResultItem{}, false, latestErr
 	}
 
@@ -310,7 +311,7 @@ func (b *TelegramBot) fetchLatestArtistAlbum(storefront, artistID string) (apput
 		return apputils.SearchResultItem{}, err
 	}
 	if len(items) == 0 {
-		return apputils.SearchResultItem{}, fmt.Errorf("no albums found for artist %s", artistID)
+		return apputils.SearchResultItem{}, fmt.Errorf("%w for artist %s", errNoArtistAlbums, artistID)
 	}
 	return items[0], nil
 }
@@ -386,11 +387,10 @@ func (b *TelegramBot) checkArtistSubscription(item telegramSubscription) {
 	}
 	b.requestStateSave()
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "no albums found") {
+		if errors.Is(err, errNoArtistAlbums) {
 			return
 		}
-		b.logTelegramPrintf("subscription check failed id=%s artist=%s err=%v\n", item.ID, item.TargetID, err)
-		b.appendTelegramRuntimeErrorLogf("subscription check failed id=%s artist=%s err=%v", item.ID, item.TargetID, err)
+		logErrorf("subscription check failed id=%s artist=%s err=%v", item.ID, item.TargetID, err)
 		return
 	}
 	latestAlbumID := strings.TrimSpace(latestAlbum.ID)
@@ -419,8 +419,7 @@ func (b *TelegramBot) checkArtistSubscription(item telegramSubscription) {
 	b.subscriptionMu.Unlock()
 
 	if err := b.triggerSubscriptionTemporaryAlbum(current, latestAlbum); err != nil {
-		b.logTelegramPrintf("subscription trigger failed id=%s album=%s err=%v\n", current.ID, latestAlbumID, err)
-		b.appendTelegramRuntimeErrorLogf("subscription trigger failed id=%s album=%s err=%v", current.ID, latestAlbumID, err)
+		logErrorf("subscription trigger failed id=%s album=%s err=%v", current.ID, latestAlbumID, err)
 		return
 	}
 

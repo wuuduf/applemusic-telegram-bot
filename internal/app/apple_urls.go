@@ -18,8 +18,18 @@ import (
 	"github.com/olekukonko/tablewriter"
 )
 
+var (
+	reCheckUrl         = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/album|\/album\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	reCheckUrlMv       = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music)\.apple\.com\/(\w{2})(?:\/music-video|\/music-video\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	reCheckUrlSong     = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/song|\/song\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	reCheckUrlPlaylist = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/playlist|\/playlist\/.+))\/(?:id)?(pl\.[\w-]+)(?:$|\?)`)
+	reCheckUrlStation  = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music)\.apple\.com\/(\w{2})(?:\/station|\/station\/.+))\/(?:id)?(ra\.[\w-]+)(?:$|\?)`)
+	reCheckUrlArtist   = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/artist|\/artist\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	reCheckUrlCurator  = regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/curator|\/curator\/.+))\/(?:id)?([A-Za-z0-9._-]+)(?:$|\?)`)
+)
+
 func checkUrl(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/album|\/album\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	pat := reCheckUrl
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -29,7 +39,7 @@ func checkUrl(url string) (string, string) {
 	}
 }
 func checkUrlMv(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music)\.apple\.com\/(\w{2})(?:\/music-video|\/music-video\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	pat := reCheckUrlMv
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -39,7 +49,7 @@ func checkUrlMv(url string) (string, string) {
 	}
 }
 func checkUrlSong(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/song|\/song\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	pat := reCheckUrlSong
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -49,7 +59,7 @@ func checkUrlSong(url string) (string, string) {
 	}
 }
 func checkUrlPlaylist(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/playlist|\/playlist\/.+))\/(?:id)?(pl\.[\w-]+)(?:$|\?)`)
+	pat := reCheckUrlPlaylist
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -60,7 +70,7 @@ func checkUrlPlaylist(url string) (string, string) {
 }
 
 func checkUrlStation(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music)\.apple\.com\/(\w{2})(?:\/station|\/station\/.+))\/(?:id)?(ra\.[\w-]+)(?:$|\?)`)
+	pat := reCheckUrlStation
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -71,7 +81,7 @@ func checkUrlStation(url string) (string, string) {
 }
 
 func checkUrlArtist(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/artist|\/artist\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
+	pat := reCheckUrlArtist
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {
@@ -82,7 +92,7 @@ func checkUrlArtist(url string) (string, string) {
 }
 
 func checkUrlCurator(url string) (string, string) {
-	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/curator|\/curator\/.+))\/(?:id)?([A-Za-z0-9._-]+)(?:$|\?)`)
+	pat := reCheckUrlCurator
 	matches := pat.FindAllStringSubmatch(url, -1)
 
 	if matches == nil {

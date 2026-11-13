@@ -37,6 +37,9 @@ type progressWriter struct {
 	done  int64
 }
 
+// ErrUnavailable means Apple has no playable asset for the requested track.
+var ErrUnavailable = errors.New("Unavailable")
+
 func (p *progressWriter) Write(b []byte) (int, error) {
 	n := len(b)
 	p.done += int64(n)
@@ -180,7 +183,7 @@ func GetWebplaybackWithContext(ctx context.Context, adamId string, authtoken str
 			continue
 		}
 	}
-	return "", "", "", errors.New("Unavailable")
+	return "", "", "", ErrUnavailable
 }
 
 type Songlist struct {

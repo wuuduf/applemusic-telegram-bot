@@ -164,7 +164,7 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 
 	videoM3U8URL := strings.TrimSpace(ctx.selectedVideo)
 	if videoM3U8URL == "" {
-		videoM3U8URL, err = extractVideoWithPreference(mvm3u8URL, *ctx.cfg, videoAspectLandscape)
+		videoM3U8URL, err = extractVideoWithPreferenceContext(ctx.session.downloadContext(), mvm3u8URL, *ctx.cfg, videoAspectLandscape)
 		if err != nil {
 			return fmt.Errorf("failed to resolve MV video stream: %w", err)
 		}
@@ -185,7 +185,7 @@ func downloadMusicVideoMediaStage(ctx *musicVideoDownloadContext) error {
 		return fmt.Errorf("failed to save MV video track: %w", err)
 	}
 
-	audioM3U8URL, err := extractMvAudioWithConfig(mvm3u8URL, *ctx.cfg)
+	audioM3U8URL, err := extractMvAudioWithContext(ctx.session.downloadContext(), mvm3u8URL, *ctx.cfg)
 	if err != nil {
 		return fmt.Errorf("failed to resolve MV audio stream: %w", err)
 	}

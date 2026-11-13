@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,6 +79,75 @@ type DownloadSession struct {
 	StaticCoverDownload bool
 
 	downloadedMetaMu sync.Mutex
+
+	// compressedUploads maps a source file to its size-reduced copy while
+	// that file is being uploaded with retries. An empty value means "reuse
+	// is wanted, nothing compressed yet".
+	compressedUploadMu sync.Mutex
+	compressedUploads  map[string]string
+}
+
+func (s *DownloadSession) beginCompressedUploadReuse(source string) {
+	if s == nil {
+		return
+	}
+	s.compressedUploadMu.Lock()
+	defer s.compressedUploadMu.Unlock()
+	if s.compressedUploads == nil {
+		s.compressedUploads = make(map[string]string)
+	}
+	if _, ok := s.compressedUploads[source]; !ok {
+		s.compressedUploads[source] = ""
+	}
+}
+
+// endCompressedUploadReuse forgets the source and deletes its compressed copy.
+func (s *DownloadSession) endCompressedUploadReuse(source string) {
+	if s == nil {
+		return
+	}
+	s.compressedUploadMu.Lock()
+	compressed := s.compressedUploads[source]
+	delete(s.compressedUploads, source)
+	s.compressedUploadMu.Unlock()
+	if compressed != "" {
+		_ = os.Remove(compressed)
+	}
+}
+
+func (s *DownloadSession) reusableCompressedUpload(source string) string {
+	if s == nil {
+		return ""
+	}
+	s.compressedUploadMu.Lock()
+	defer s.compressedUploadMu.Unlock()
+	compressed := s.compressedUploads[source]
+	if compressed == "" {
+		return ""
+	}
+	if info, err := os.Stat(compressed); err != nil || info.Size() <= 0 {
+		return ""
+	}
+	return compressed
+}
+
+// retainCompressedUpload hands the compressed copy to the session when reuse
+// was requested for source; it reports whether the session now owns the file.
+func (s *DownloadSession) retainCompressedUpload(source string, compressed string) bool {
+	if s == nil || compressed == "" {
+		return false
+	}
+	s.compressedUploadMu.Lock()
+	defer s.compressedUploadMu.Unlock()
+	previous, wanted := s.compressedUploads[source]
+	if !wanted {
+		return false
+	}
+	if previous != "" && previous != compressed {
+		_ = os.Remove(previous)
+	}
+	s.compressedUploads[source] = compressed
+	return true
 }
 
 type JobContext struct {

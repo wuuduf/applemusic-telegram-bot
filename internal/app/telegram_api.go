@@ -1,68 +1,44 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// isRetryableUploadError reports whether an upload is worth repeating. A
+// Bot API failure is judged by its structured fields; anything else (network
+// and pipe errors) by the well-known transient phrases in its text.
 func isRetryableUploadError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, ok := parseTelegramRetryAfter(err); ok {
+	if apiErr, ok := asTelegramAPIError(err); ok {
+		return apiErr.retryable()
+	}
+	if _, ok := retryAfterFromText(err.Error()); ok {
 		return true
 	}
-	lower := strings.ToLower(err.Error())
-	retryableHints := []string{
-		"context deadline exceeded",
-		"client.timeout exceeded",
-		"tls handshake timeout",
-		"connection reset by peer",
-		"use of closed network connection",
-		"broken pipe",
-		"read/write on closed pipe",
-		"i/o timeout",
-		"eof",
-		"unexpected eof",
-		"bad gateway",
-		"temporarily unavailable",
-		"too many requests",
-		"file_parts_invalid",
-	}
-	for _, hint := range retryableHints {
-		if strings.Contains(lower, hint) {
-			return true
-		}
-	}
-	return false
+	return containsRetryableHint(err.Error())
 }
 
+// parseTelegramRetryAfter returns the wait Telegram asked for. It reads the
+// structured error when there is one and parses the text only for errors
+// that carry no structure (e.g. ones rebuilt from sanitized strings).
 func parseTelegramRetryAfter(err error) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
-	msg := err.Error()
-	for _, re := range []*regexp.Regexp{retryAfterJSONRe, retryAfterTextRe} {
-		matches := re.FindStringSubmatch(msg)
-		if len(matches) < 2 {
-			continue
-		}
-		sec, convErr := strconv.Atoi(matches[1])
-		if convErr != nil || sec <= 0 {
-			continue
-		}
-		return time.Duration(sec) * time.Second, true
+	if apiErr, ok := asTelegramAPIError(err); ok {
+		return apiErr.retryAfter()
 	}
-	return 0, false
+	return retryAfterFromText(err.Error())
 }
 
 func isTelegramRateLimitError(err error) bool {
@@ -72,35 +48,50 @@ func isTelegramRateLimitError(err error) bool {
 	if errors.Is(err, errTelegramSendDeferred) {
 		return true
 	}
-	if _, ok := parseTelegramRetryAfter(err); ok {
+	if apiErr, ok := asTelegramAPIError(err); ok {
+		return apiErr.rateLimited()
+	}
+	if _, ok := retryAfterFromText(err.Error()); ok {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "429") && strings.Contains(lower, "too many requests")
 }
 
-func telegramAPIHTTPError(operation string, status string, responseBody []byte) error {
-	bodyText := strings.TrimSpace(string(bytes.TrimSpace(responseBody)))
-	if bodyText == "" {
-		return fmt.Errorf("%s failed: %s", operation, status)
+// telegramAPIHTTPErrorText is "<operation> failed: <status> <body>".
+func telegramAPIHTTPErrorText(operation string, status string, body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return fmt.Sprintf("%s failed: %s", operation, status)
 	}
-	return fmt.Errorf("%s failed: %s %s", operation, status, bodyText)
+	return fmt.Sprintf("%s failed: %s %s", operation, status, body)
 }
 
-func telegramAPIResponseError(operation string, description string, params apiResponseParameters) error {
+// telegramAPIResponseErrorText is "<operation> error: <description>", with
+// parameters.retry_after spelled out after the description when present.
+func telegramAPIResponseErrorText(operation string, description string, retryAfter int) string {
 	description = strings.TrimSpace(description)
-	if params.RetryAfter > 0 {
+	if retryAfter > 0 {
 		if description == "" {
-			description = fmt.Sprintf(`{"parameters":{"retry_after":%d}}`, params.RetryAfter)
+			description = fmt.Sprintf(`{"parameters":{"retry_after":%d}}`, retryAfter)
 		} else {
-			description = fmt.Sprintf(`%s {"parameters":{"retry_after":%d}}`, description, params.RetryAfter)
+			description = fmt.Sprintf(`%s {"parameters":{"retry_after":%d}}`, description, retryAfter)
 		}
 	}
 	if description == "" {
-		return fmt.Errorf("%s error", operation)
+		return fmt.Sprintf("%s error", operation)
 	}
-	return fmt.Errorf("%s error: %s", operation, description)
+	return fmt.Sprintf("%s error: %s", operation, description)
 }
+
+// telegramStatusError carries the HTTP status of a failed Bot API call so
+// callers can branch on it instead of searching the message text.
+type telegramStatusError struct {
+	code int
+	msg  string
+}
+
+func (e telegramStatusError) Error() string { return e.msg }
 
 func isPipeClosedError(err error) bool {
 	if err == nil {
@@ -113,6 +104,17 @@ func isPipeClosedError(err error) bool {
 	return strings.Contains(lower, "read/write on closed pipe")
 }
 
+// telegramAnswerErrorText words a failed answerCallbackQuery /
+// answerInlineQuery. Callers treat these answers as best effort.
+func telegramAnswerErrorText(operation string) telegramErrorFormat {
+	return telegramErrorText(
+		func(e *telegramAPIError) string {
+			return telegramAPIHTTPErrorText(operation, e.Status, e.Body)
+		},
+		telegramErrorWithParameters(operation),
+	)
+}
+
 func (b *TelegramBot) answerCallbackQuery(callbackID string) error {
 	if callbackID == "" {
 		return nil
@@ -120,21 +122,9 @@ func (b *TelegramBot) answerCallbackQuery(callbackID string) error {
 	payload := map[string]any{
 		"callback_query_id": callbackID,
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("POST", b.apiURL("answerCallbackQuery"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return nil
+	_, err := callTelegramJSON[telegramNoResult](b.operationContext(), b, "answerCallbackQuery", payload,
+		telegramAnswerErrorText("telegram answerCallbackQuery"))
+	return err
 }
 
 func (b *TelegramBot) answerInlineQuery(inlineQueryID string, results any, personal bool) error {
@@ -147,21 +137,9 @@ func (b *TelegramBot) answerInlineQuery(inlineQueryID string, results any, perso
 		"is_personal":     personal,
 		"cache_time":      0,
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("POST", b.apiURL("answerInlineQuery"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return nil
+	_, err := callTelegramJSON[telegramNoResult](b.operationContext(), b, "answerInlineQuery", payload,
+		telegramAnswerErrorText("telegram answerInlineQuery"))
+	return err
 }
 
 func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, markup any) error {
@@ -171,6 +149,16 @@ func (b *TelegramBot) editMessageText(chatID int64, messageID int, text string, 
 func (b *TelegramBot) editMessageTextBestEffort(chatID int64, messageID int, text string, markup any) error {
 	return b.editMessageTextWithMode(chatID, messageID, text, markup, true)
 }
+
+var editMessageTextErrorText = telegramErrorText(
+	func(e *telegramAPIError) string {
+		if e.Decoded && e.Description != "" {
+			return "telegram editMessageText error: " + e.Description
+		}
+		return "telegram editMessageText failed: " + e.Body
+	},
+	telegramErrorDescription("telegram editMessageText"),
+)
 
 func (b *TelegramBot) editMessageTextWithMode(chatID int64, messageID int, text string, markup any, bestEffort bool) error {
 	if messageID == 0 {
@@ -195,54 +183,22 @@ func (b *TelegramBot) editMessageTextWithMode(chatID int64, messageID int, text 
 	if markup != nil {
 		payload["reply_markup"] = markup
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	_, err := callTelegramJSON[telegramNoResult](ctx, b, "editMessageText", payload, editMessageTextErrorText)
+	if apiErr, ok := asTelegramAPIError(err); ok && apiErr.Decoded && strings.Contains(apiErr.Description, "message is not modified") {
+		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("editMessageText"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		apiResp := apiResponse{}
-		if err := json.Unmarshal(responseBody, &apiResp); err == nil {
-			if strings.Contains(apiResp.Description, "message is not modified") {
-				return nil
-			}
-			if apiResp.Description != "" {
-				err = fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
-				b.noteTelegramRateLimit(err)
-				return err
-			}
-		}
-		err = fmt.Errorf("telegram editMessageText failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	apiResp := apiResponse{}
-	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		if strings.Contains(apiResp.Description, "message is not modified") {
-			return nil
-		}
-		err = fmt.Errorf("telegram editMessageText error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	return nil
+	return err
 }
+
+var deleteMessageErrorText = telegramErrorText(
+	func(e *telegramAPIError) string {
+		if desc := strings.TrimSpace(e.Description); e.Decoded && desc != "" {
+			return "telegram deleteMessage failed: " + desc
+		}
+		return "telegram deleteMessage failed: " + e.Body
+	},
+	telegramErrorDescription("telegram deleteMessage"),
+)
 
 func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 	if messageID == 0 {
@@ -258,54 +214,17 @@ func (b *TelegramBot) deleteMessage(chatID int64, messageID int) error {
 		"chat_id":    chatID,
 		"message_id": messageID,
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", b.apiURL("deleteMessage"), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		apiResp := apiResponse{}
-		if err := json.Unmarshal(responseBody, &apiResp); err == nil && strings.TrimSpace(apiResp.Description) != "" {
-			if isIgnorableDeleteMessageError(apiResp.Description) {
-				return nil
-			}
-			err = fmt.Errorf("telegram deleteMessage failed: %s", strings.TrimSpace(apiResp.Description))
-			b.noteTelegramRateLimit(err)
-			return err
-		}
-		err = fmt.Errorf("telegram deleteMessage failed: %s", strings.TrimSpace(string(responseBody)))
-		b.noteTelegramRateLimit(err)
-		return err
-	}
-	if len(bytes.TrimSpace(responseBody)) == 0 {
-		return nil
-	}
-	apiResp := apiResponse{}
-	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
-		return err
-	}
-	if !apiResp.OK {
-		if isIgnorableDeleteMessageError(apiResp.Description) {
+	_, err := callTelegramJSON[telegramNoResult](ctx, b, "deleteMessage", payload, deleteMessageErrorText)
+	if apiErr, ok := asTelegramAPIError(err); ok {
+		if apiErr.Decoded && isIgnorableDeleteMessageError(apiErr.Description) {
 			return nil
 		}
-		err = fmt.Errorf("telegram deleteMessage error: %s", apiResp.Description)
-		b.noteTelegramRateLimit(err)
-		return err
+		// An empty HTTP 200 body counts as deleted.
+		if apiErr.StatusCode == http.StatusOK && apiErr.Body == "" {
+			return nil
+		}
 	}
-	return nil
+	return err
 }
 
 func isIgnorableDeleteMessageError(description string) bool {
@@ -347,9 +266,9 @@ func (b *TelegramBot) getUpdatesWithOptions(offset int, timeoutSec int, limit in
 		responseBody, _ := io.ReadAll(resp.Body)
 		apiResp := apiResponse{}
 		if err := json.Unmarshal(responseBody, &apiResp); err == nil && strings.TrimSpace(apiResp.Description) != "" {
-			return nil, fmt.Errorf("getUpdates failed: %s (%s)", resp.Status, apiResp.Description)
+			return nil, telegramStatusError{code: resp.StatusCode, msg: fmt.Sprintf("getUpdates failed: %s (%s)", resp.Status, apiResp.Description)}
 		}
-		return nil, fmt.Errorf("getUpdates failed: %s", resp.Status)
+		return nil, telegramStatusError{code: resp.StatusCode, msg: fmt.Sprintf("getUpdates failed: %s", resp.Status)}
 	}
 	var data getUpdatesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {

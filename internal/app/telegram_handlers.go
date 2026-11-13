@@ -88,6 +88,17 @@ func (b *TelegramBot) allowUserAction(chatID, userID int64, replyToID int) bool 
 	return false
 }
 
+// selectionStartsDownload reports whether picking an entry of the search
+// panel at messageID leads to a download (as opposed to opening an artist
+// panel).
+func (b *TelegramBot) selectionStartsDownload(chatID int64, messageID int) bool {
+	pending, ok := b.getPending(chatID, messageID)
+	if !ok {
+		return false
+	}
+	return pending.Kind != "artist"
+}
+
 func formatRetryAfter(d time.Duration) string {
 	if d < time.Second {
 		d = time.Second
@@ -110,6 +121,7 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 		return
 	}
 	b.markMessageInteraction(cb.Message.Chat.ID, cb.Message.MessageID)
+	defer b.finishActionCharge(cb.Message.Chat.ID)
 	data := strings.TrimSpace(cb.Data)
 	if strings.HasPrefix(data, "admin:") {
 		b.handleAdminCallback(cb)
@@ -124,6 +136,15 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 	if strings.HasPrefix(data, "sel:") {
 		numStr := strings.TrimPrefix(data, "sel:")
 		if n, err := strconv.Atoi(numStr); err == nil {
+			// Search commands are free, so the download a search result
+			// starts is charged here; otherwise search + tap would bypass
+			// the per-user limiter. Picking an artist only opens another
+			// panel and is charged when something is finally selected.
+			if b.selectionStartsDownload(cb.Message.Chat.ID, cb.Message.MessageID) &&
+				!b.allowUserAction(cb.Message.Chat.ID, callbackUserID(cb), cb.Message.MessageID) {
+				_ = b.answerCallbackQuery(cb.ID)
+				return
+			}
 			b.handleSelection(cb.Message.Chat.ID, cb.Message.MessageID, n)
 		}
 	} else if strings.HasPrefix(data, "mvstream:") {
@@ -175,6 +196,12 @@ func (b *TelegramBot) handleCallback(cb *CallbackQuery) {
 		_ = b.editMessageText(cb.Message.Chat.ID, cb.Message.MessageID, b.formatSettingsText(settings), b.buildSettingsKeyboard(settings))
 	} else if strings.HasPrefix(data, "setting_worker:") {
 		workerRaw := strings.TrimPrefix(data, "setting_worker:")
+		// The worker limit is global, so only admins may change it.
+		if !b.isAdminUser(callbackUserID(cb)) {
+			_ = b.sendMessageWithReply(cb.Message.Chat.ID, "只有管理员可以修改任务线程数。", nil, cb.Message.MessageID)
+			_ = b.answerCallbackQuery(cb.ID)
+			return
+		}
 		if limit, ok := parseTaskWorkerLimit(workerRaw); ok {
 			_ = b.setTaskWorkerLimit(limit)
 		}
@@ -274,8 +301,7 @@ func (b *TelegramBot) triggerAdminCachePush(chatID int64, replyToID int) {
 				if isTelegramRateLimitError(err) {
 					rateLimitedItems = append(rateLimitedItems, item)
 				}
-				b.logTelegramPrintf("admin cache push failed idx=%d track=%s err=%v\n", idx+1, item.TrackID, err)
-				b.appendTelegramRuntimeErrorLogf("admin cache push failed idx=%d track=%s err=%v", idx+1, item.TrackID, err)
+				logErrorf("admin cache push failed idx=%d track=%s err=%v", idx+1, item.TrackID, err)
 			} else {
 				success++
 			}
@@ -296,8 +322,7 @@ func (b *TelegramBot) triggerAdminCachePush(chatID int64, replyToID int) {
 					return
 				}
 				if err := b.sendAudioByFileIDWithoutSongComment(targetChatID, item.Entry, 0, item.TrackID); err != nil {
-					b.logTelegramPrintf("admin cache push retry failed round=%d idx=%d track=%s err=%v\n", round, idx+1, item.TrackID, err)
-					b.appendTelegramRuntimeErrorLogf("admin cache push retry failed round=%d idx=%d track=%s err=%v", round, idx+1, item.TrackID, err)
+					logErrorf("admin cache push retry failed round=%d idx=%d track=%s err=%v", round, idx+1, item.TrackID, err)
 					if isTelegramRateLimitError(err) {
 						nextRound = append(nextRound, item)
 					}
@@ -346,7 +371,9 @@ func (b *TelegramBot) handleInlineQuery(q *InlineQuery) {
 		return
 	}
 	trackID := extractInlineTrackID(query)
-	if trackID == "" {
+	// Inline queries fire on every keystroke; only well-formed song IDs may
+	// reach the cache lookup and the Apple Music API.
+	if !mediaIDNumericRe.MatchString(trackID) || len(trackID) > maxMediaIDLength {
 		_ = b.answerInlineQuery(q.ID, []any{}, true)
 		return
 	}

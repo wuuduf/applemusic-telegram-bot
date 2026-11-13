@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +24,13 @@ type telegramCleanupTracker struct {
 	total    int64
 	lastScan time.Time
 	scanRuns int
+
+	// Files a running task still needs: pinned holds explicit paths with a
+	// reference count, activeTasks the start time of every task whose fresh
+	// output (anything modified since it started) must survive until upload.
+	pinned      map[string]int
+	activeTasks map[uint64]time.Time
+	taskSeq     uint64
 
 	nowFn      func() time.Time
 	scanFolder func(root string, cacheFile string) (int64, []downloadFileEntry, error)
@@ -168,6 +174,82 @@ func (t *telegramCleanupTracker) RecordPaths(paths []string) {
 	}
 }
 
+// beginTask protects every file modified from now on until the returned
+// release func is called. Use it for tasks that download everything before
+// uploading (ZIP and bundle transfers), where quota cleanup could otherwise
+// delete early tracks before they are sent.
+func (t *telegramCleanupTracker) beginTask() func() {
+	if t == nil {
+		return func() {}
+	}
+	t.mu.Lock()
+	if t.activeTasks == nil {
+		t.activeTasks = make(map[uint64]time.Time)
+	}
+	t.taskSeq++
+	id := t.taskSeq
+	t.activeTasks[id] = t.nowFn()
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			delete(t.activeTasks, id)
+			t.mu.Unlock()
+		})
+	}
+}
+
+// pinPaths protects specific files (for example reused, older downloads that
+// are about to be uploaded) until the returned release func is called.
+func (t *telegramCleanupTracker) pinPaths(paths []string) func() {
+	if t == nil || len(paths) == 0 {
+		return func() {}
+	}
+	cleaned := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if trimmed := strings.TrimSpace(path); trimmed != "" {
+			cleaned = append(cleaned, filepath.Clean(trimmed))
+		}
+	}
+	t.mu.Lock()
+	if t.pinned == nil {
+		t.pinned = make(map[string]int)
+	}
+	for _, path := range cleaned {
+		t.pinned[path]++
+	}
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			for _, path := range cleaned {
+				if t.pinned[path] <= 1 {
+					delete(t.pinned, path)
+				} else {
+					t.pinned[path]--
+				}
+			}
+			t.mu.Unlock()
+		})
+	}
+}
+
+// earliestActiveTaskLocked returns the start time of the oldest running
+// protected task. Caller holds t.mu.
+func (t *telegramCleanupTracker) earliestActiveTaskLocked() (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, startedAt := range t.activeTasks {
+		if !found || startedAt.Before(earliest) {
+			earliest = startedAt
+			found = true
+		}
+	}
+	return earliest, found
+}
+
 func (t *telegramCleanupTracker) cleanupOnce(forceScan bool) {
 	t.cleanupOnceWithReason(forceScan, "manual")
 }
@@ -204,11 +286,18 @@ func (t *telegramCleanupTracker) cleanupOnceWithReason(forceScan bool, reason st
 		}
 		return entries[i].modTime.Before(entries[j].modTime)
 	})
+	taskStartedAt, taskActive := t.earliestActiveTaskLocked()
 	for _, entry := range entries {
 		if t.total <= t.maxBytes {
 			break
 		}
 		if t.protectAge > 0 && now.Sub(entry.modTime) < t.protectAge {
+			continue
+		}
+		if t.pinned[filepath.Clean(entry.path)] > 0 {
+			continue
+		}
+		if taskActive && !entry.modTime.Before(taskStartedAt) {
 			continue
 		}
 		err := t.removeFile(entry.path)
@@ -297,8 +386,8 @@ func (t *telegramCleanupTracker) logCleanupStatus(reason string, scanned bool, d
 		}
 		rootPaths = append(rootPaths, root.Path)
 	}
-	fmt.Printf(
-		"telegram cleanup status reason=%s total=%s max=%s tracked=%d scanned=%t scan_runs=%d deleted=%d reclaimed=%s roots=%s\n",
+	logInfof(
+		"telegram cleanup status reason=%s total=%s max=%s tracked=%d scanned=%t scan_runs=%d deleted=%d reclaimed=%s roots=%s",
 		strings.TrimSpace(reason),
 		formatBytes(total),
 		formatBytes(t.maxBytes),

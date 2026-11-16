@@ -291,7 +291,3 @@ func (b *TelegramBot) toggleChatSongZip(chatID int64) ChatDownloadSettings {
 		return current
 	})
 }
-
-func (b *TelegramBot) getChatFormat(chatID int64) string {
-	return b.getChatSettings(chatID).Format
-}

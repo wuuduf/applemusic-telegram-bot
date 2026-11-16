@@ -2,7 +2,7 @@ module github.com/wuuduf/applemusic-telegram-bot/wrapper-shim
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	google.golang.org/grpc v1.83.1

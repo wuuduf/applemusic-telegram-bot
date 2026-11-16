@@ -79,10 +79,6 @@ func shouldUseTelegramCollectionSequentialOneByOne(single bool, transferMode str
 	}
 }
 
-func (b *TelegramBot) prepareTelegramDownloadSession(single bool, forceRefresh bool, settings ChatDownloadSettings, mediaType string, progress func(phase string, done, total int64)) (*DownloadSession, error) {
-	return b.prepareTelegramDownloadSessionWithContext(b.operationContext(), single, forceRefresh, settings, mediaType, progress)
-}
-
 func (b *TelegramBot) prepareTelegramDownloadSessionWithContext(ctx context.Context, single bool, forceRefresh bool, settings ChatDownloadSettings, mediaType string, progress func(phase string, done, total int64)) (*DownloadSession, error) {
 	session := b.newBotDownloadSession(Config)
 	if ctx != nil {
@@ -131,7 +127,7 @@ func (b *TelegramBot) resolveCollectionTracksForSequential(session *DownloadSess
 	}
 	switch mediaType {
 	case mediaTypeAlbum:
-		ctx, err := resolveAlbumMediaStage(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken, "")
+		ctx, err := resolveAlbumMediaStage(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
 		if err != nil {
 			return nil, false, err
 		}
@@ -141,7 +137,7 @@ func (b *TelegramBot) resolveCollectionTracksForSequential(session *DownloadSess
 		}
 		return ctx.album.Tracks, false, nil
 	case mediaTypePlaylist:
-		ctx, err := resolvePlaylistMediaStage(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+		ctx, err := resolvePlaylistMediaStage(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		if err != nil {
 			return nil, false, err
 		}
@@ -151,7 +147,7 @@ func (b *TelegramBot) resolveCollectionTracksForSequential(session *DownloadSess
 		}
 		return ctx.playlist.Tracks, false, nil
 	case mediaTypeStation:
-		ctx, err := resolveStationMediaStage(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+		ctx, err := resolveStationMediaStage(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		if err != nil {
 			return nil, false, err
 		}
@@ -198,10 +194,6 @@ func (b *TelegramBot) sendArtistSongsProgressUpdate(chatID int64, replyToID int,
 	_ = b.sendMessageWithReply(chatID, fmt.Sprintf("%d/%d", completed, total), nil, replyToID)
 }
 
-func (b *TelegramBot) runCollectionOneByOneSequential(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, mediaType string, mediaID string, storefront string, status *DownloadStatus, statusLabelPrefix string, progress func(phase string, done, total int64)) (bool, bool, error) {
-	return b.runCollectionOneByOneSequentialWithContext(b.operationContext(), chatID, replyToID, forceRefresh, settings, mediaType, mediaID, storefront, status, statusLabelPrefix, progress)
-}
-
 func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Context, chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, mediaType string, mediaID string, storefront string, status *DownloadStatus, statusLabelPrefix string, progress func(phase string, done, total int64)) (bool, bool, error) {
 	if !shouldUseTelegramCollectionSequentialOneByOne(false, transferModeOneByOne, mediaType) {
 		return false, false, nil
@@ -214,9 +206,9 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 	var tracks []task.Track
 	stationStream := false
 	resolveErr := func() error {
-		// Keep core serialized to avoid heavy external tool contention.
-		b.downloadCoreMu.Lock()
-		defer b.downloadCoreMu.Unlock()
+		// The download core is limited to avoid heavy external tool contention.
+		releaseCore := b.acquireDownloadCore(mediaType, mediaID)
+		defer releaseCore()
 
 		var err error
 		session, err = b.prepareTelegramDownloadSessionWithContext(ctx, false, forceRefresh, settings, mediaType, progress)
@@ -267,13 +259,13 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 		}
 
 		downloadFailed := false
-		// Keep core serialized to avoid heavy external tool contention.
+		// The download core is limited to avoid heavy external tool contention.
 		func() {
-			b.downloadCoreMu.Lock()
-			defer b.downloadCoreMu.Unlock()
+			releaseCore := b.acquireDownloadCore(mediaTypeSong, trackID)
+			defer releaseCore()
 			session.clearDownloadState()
 			if mediaType == mediaTypeArtistSongs {
-				if err := ripSong(session, trackID, b.appleToken, storefront, session.Config.MediaUserToken); err != nil {
+				if err := ripSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
 					if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 						downloadFailed = true
 						return
@@ -283,7 +275,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 				}
 				return
 			}
-			ripTrack(session, track, b.appleToken, session.Config.MediaUserToken)
+			ripTrack(session, track, b.currentAppleToken(), session.Config.MediaUserToken)
 		}()
 		if downloadFailed {
 			return true, sentAny, session.downloadContext().Err()
@@ -537,9 +529,9 @@ func (b *TelegramBot) runDownloadWithContextResult(ctx context.Context, chatID i
 	primaryCount := 0
 	var session *DownloadSession
 	coreErr := func() error {
-		// Keep core serialized to avoid heavy external tool contention.
-		b.downloadCoreMu.Lock()
-		defer b.downloadCoreMu.Unlock()
+		// The download core is limited to avoid heavy external tool contention.
+		releaseCore := b.acquireDownloadCore(mediaType, mediaID)
+		defer releaseCore()
 
 		session, err = b.prepareTelegramDownloadSessionWithContext(ctx, single, forceRefresh, settings, mediaType, progress)
 		if err != nil {

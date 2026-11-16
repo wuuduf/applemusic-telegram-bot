@@ -230,7 +230,7 @@ func shouldRetryError(ctx context.Context, err error) bool {
 		return false
 	}
 	if ne, ok := err.(net.Error); ok {
-		return ne.Timeout() || ne.Temporary()
+		return ne.Timeout()
 	}
 	return true
 }

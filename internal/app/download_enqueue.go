@@ -201,7 +201,7 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 		return
 	}
 	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferMode, mediaTypeSong, songID, storefront, inflightKey, func(session *DownloadSession) error {
-		return ripSong(session, songID, b.appleToken, storefront, session.Config.MediaUserToken)
+		return ripSong(session, songID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 	}); !queued {
 		b.releaseInflightDownload(inflightKey)
 	}
@@ -302,10 +302,6 @@ func (b *TelegramBot) queueDownloadAlbum(chatID int64, albumID string) {
 	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, Config.Storefront, 0, false)
 }
 
-func (b *TelegramBot) queueDownloadAlbumWithReply(chatID int64, albumID string, replyToID int) {
-	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, Config.Storefront, replyToID, false)
-}
-
 func (b *TelegramBot) queueDownloadAlbumWithStorefront(chatID int64, albumID string, storefront string, replyToID int) {
 	b.queueDownloadAlbumWithStorefrontOptions(chatID, albumID, storefront, replyToID, false)
 }
@@ -322,14 +318,6 @@ func (b *TelegramBot) queueDownloadPlaylist(chatID int64, playlistID string) {
 	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, Config.Storefront, 0, false)
 }
 
-func (b *TelegramBot) queueDownloadPlaylistWithReply(chatID int64, playlistID string, replyToID int) {
-	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, Config.Storefront, replyToID, false)
-}
-
-func (b *TelegramBot) queueDownloadPlaylistWithStorefront(chatID int64, playlistID string, storefront string, replyToID int) {
-	b.queueDownloadPlaylistWithStorefrontOptions(chatID, playlistID, storefront, replyToID, false)
-}
-
 func (b *TelegramBot) queueDownloadPlaylistWithStorefrontOptions(chatID int64, playlistID string, storefront string, replyToID int, forceRefresh bool) {
 	if playlistID == "" {
 		_ = b.sendMessage(chatID, "Playlist ID is empty.", nil)
@@ -340,10 +328,6 @@ func (b *TelegramBot) queueDownloadPlaylistWithStorefrontOptions(chatID int64, p
 
 func (b *TelegramBot) queueDownloadStation(chatID int64, stationID string) {
 	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, 0, false)
-}
-
-func (b *TelegramBot) queueDownloadStationWithReply(chatID int64, stationID string, replyToID int) {
-	b.queueDownloadStationWithStorefront(chatID, stationID, Config.Storefront, replyToID, false)
 }
 
 func (b *TelegramBot) queueDownloadStationWithStorefront(chatID int64, stationID string, storefront string, replyToID int, forceRefresh bool) {
@@ -360,10 +344,6 @@ func (b *TelegramBot) queueDownloadStationWithStorefront(chatID int64, stationID
 
 func (b *TelegramBot) queueDownloadMusicVideo(chatID int64, mvID string) {
 	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, 0, false)
-}
-
-func (b *TelegramBot) queueDownloadMusicVideoWithReply(chatID int64, mvID string, replyToID int) {
-	b.queueDownloadMusicVideoWithStorefront(chatID, mvID, Config.Storefront, replyToID, false)
 }
 
 func (b *TelegramBot) queueDownloadMusicVideoWithStorefront(chatID int64, mvID string, storefront string, replyToID int, forceRefresh bool) {
@@ -418,15 +398,15 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	switch mediaType {
 	case mediaTypeAlbum:
 		enqueueWithRollback(func(session *DownloadSession) error {
-			return ripAlbum(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken, "")
+			return ripAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
 		})
 	case mediaTypePlaylist:
 		enqueueWithRollback(func(session *DownloadSession) error {
-			return ripPlaylist(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+			return ripPlaylist(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		})
 	case mediaTypeStation:
 		enqueueWithRollback(func(session *DownloadSession) error {
-			return ripStation(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+			return ripStation(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		})
 	case mediaTypeArtistSongs:
 		enqueueWithRollback(func(session *DownloadSession) error {

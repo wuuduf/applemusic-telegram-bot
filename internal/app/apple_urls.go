@@ -12,7 +12,6 @@ import (
 	"time"
 
 	sharedcatalog "github.com/wuuduf/applemusic-telegram-bot/internal/catalog"
-	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
@@ -196,25 +195,6 @@ func extractFirstAppleMusicURL(text string) string {
 	}
 	return urls[0]
 }
-func getUrlSong(songUrl string, token string) (string, error) {
-	storefront, songId := checkUrlSong(songUrl)
-	manifest, err := ampapi.GetSongResp(storefront, songId, Config.Language, token)
-	if err != nil {
-		fmt.Println("\u26A0 Failed to get manifest:", err)
-		return "", err
-	}
-	item, err := firstSongData("main.getUrlSong", manifest)
-	if err != nil {
-		return "", err
-	}
-	albumId, err := firstSongAlbumID("main.getUrlSong", item)
-	if err != nil {
-		return "", err
-	}
-	songAlbumUrl := fmt.Sprintf("https://music.apple.com/%s/album/1/%s?i=%s", storefront, albumId, songId)
-	return songAlbumUrl, nil
-}
-
 func catalogServiceForToken(token string, opPrefix string) *sharedcatalog.Service {
 	return &sharedcatalog.Service{
 		AppleToken:     token,

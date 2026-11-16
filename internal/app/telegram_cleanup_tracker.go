@@ -409,8 +409,3 @@ func (t *telegramCleanupTracker) cleanupRootForPathLocked(path string) (sharedst
 	}
 	return sharedstorage.CleanupRoot{}, false
 }
-
-func (t *telegramCleanupTracker) withinRootsLocked(path string) bool {
-	_, ok := t.cleanupRootForPathLocked(path)
-	return ok
-}

@@ -172,18 +172,24 @@ func applyTelegramAudioEmbeddingPolicy(session *DownloadSession, settings ChatDo
 }
 
 type TelegramBot struct {
-	token         string
-	apiBase       string
-	proxyInfo     string
-	appleToken    string
-	client        *http.Client
-	pollClient    *http.Client
-	allowedChats  map[int64]bool
-	adminUsers    map[int64]bool
-	forwardChatID int64
-	searchLimit   int
-	maxFileBytes  int64
-	errorLogFile  string
+	token      string
+	apiBase    string
+	proxyInfo  string
+	appleToken string
+	// appleTokenAuto: the token came from Apple's web player rather than the
+	// config, so currentAppleToken keeps it fresh. appleTokenMu guards
+	// appleToken and appleTokenRetryAt when it is set.
+	appleTokenAuto    bool
+	appleTokenMu      sync.Mutex
+	appleTokenRetryAt time.Time
+	client            *http.Client
+	pollClient        *http.Client
+	allowedChats      map[int64]bool
+	adminUsers        map[int64]bool
+	forwardChatID     int64
+	searchLimit       int
+	maxFileBytes      int64
+	errorLogFile      string
 
 	getUpdatesErrorDelay    time.Duration
 	getUpdatesConflictDelay time.Duration
@@ -225,7 +231,8 @@ type TelegramBot struct {
 	queueNextTicket  uint64
 	queueDoneTickets map[uint64]struct{}
 
-	downloadCoreMu sync.Mutex
+	downloadCore     *downloadCoreGate
+	downloadCoreOnce sync.Once
 
 	cacheMu    sync.Mutex
 	cacheFile  string

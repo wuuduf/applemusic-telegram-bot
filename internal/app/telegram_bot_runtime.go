@@ -50,10 +50,12 @@ func runTelegramBot(appleToken string) {
 	for {
 		// The Apple web token expires; each runtime (daily restart included)
 		// starts from the current one instead of the token read at launch.
+		appleTokenAuto := false
 		if fresh, err := ampapi.GetToken(); err == nil && strings.TrimSpace(fresh) != "" {
 			appleToken = fresh
+			appleTokenAuto = true
 		}
-		bot := newTelegramBot(botToken, appleToken)
+		bot := newTelegramBot(botToken, appleToken, appleTokenAuto)
 		setRuntimeErrorLogPath(bot.errorLogFile)
 		logInfof("Telegram bot started. Waiting for updates...")
 		logInfof("Telegram API base: %s (proxy=%s, api timeout=%s, poll timeout=%s)", bot.apiBase, bot.proxyInfo, bot.client.Timeout, bot.pollClient.Timeout)

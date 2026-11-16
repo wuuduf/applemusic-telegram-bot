@@ -201,7 +201,7 @@ func (b *TelegramBot) enrichSongMetaFromApple(chatID int64, meta AudioMeta) Audi
 	if configured := strings.TrimSpace(Config.Language); configured != "" {
 		lang = configured
 	}
-	token := strings.TrimSpace(b.appleToken)
+	token := strings.TrimSpace(b.currentAppleToken())
 	ctx := b.operationContext()
 	reqCtx, cancel := context.WithTimeout(ctx, songCommentAppleMetaTimeout)
 	defer cancel()

@@ -32,10 +32,14 @@ func (b *TelegramBot) startDownloadWorker() {
 					for (b.activeWorkers >= b.workerLimit || ticket != b.queueNextTicket) && !b.isRequestCanceled(req.requestID) && !b.isShuttingDown() {
 						b.queueCond.Wait()
 					}
-					if b.isShuttingDown() || b.consumeCanceledRequest(req.requestID) {
+					canceled := b.consumeCanceledRequest(req.requestID)
+					if canceled || b.isShuttingDown() {
 						b.finishQueueTicketLocked(ticket)
 						b.queueMu.Unlock()
-						if strings.TrimSpace(req.requestID) != "" {
+						// A request skipped only because the bot is stopping
+						// stays in the persisted state, so the next start
+						// re-queues it. One the user canceled is forgotten.
+						if canceled && strings.TrimSpace(req.requestID) != "" {
 							b.untrackRequest(req.requestID)
 						}
 						if strings.TrimSpace(req.inflightKey) != "" {
@@ -52,6 +56,7 @@ func (b *TelegramBot) startDownloadWorker() {
 						taskType = normalizeTelegramTaskType(req.taskType)
 					}
 					panicked := false
+					interruptedByShutdown := false
 					defer func() {
 						if panicked {
 							appRuntimeMetrics.recordTaskPanic(taskType)
@@ -87,7 +92,10 @@ func (b *TelegramBot) startDownloadWorker() {
 						if strings.TrimSpace(req.requestID) != "" {
 							b.clearRunningRequestCancel(req.requestID)
 						}
-						if strings.TrimSpace(req.requestID) != "" {
+						// A task cut short by shutdown stays tracked and is
+						// retried after the restart (recovery gives up after
+						// maxRecoveredRequestAttempts interruptions).
+						if strings.TrimSpace(req.requestID) != "" && !interruptedByShutdown {
 							b.untrackRequest(req.requestID)
 						}
 						if strings.TrimSpace(req.inflightKey) != "" {
@@ -112,6 +120,7 @@ func (b *TelegramBot) startDownloadWorker() {
 						defer reqCancel()
 					}
 					b.runQueuedRequestWithContext(req, reqCtx)
+					interruptedByShutdown = b.isShuttingDown()
 				}()
 			}
 		}()

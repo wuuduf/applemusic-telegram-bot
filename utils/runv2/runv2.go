@@ -50,22 +50,6 @@ type TimedResponseBody struct {
 
 type ProgressFunc func(phase string, done, total int64)
 
-type progressWriter struct {
-	cb    ProgressFunc
-	phase string
-	total int64
-	done  int64
-}
-
-func (p *progressWriter) Write(b []byte) (int, error) {
-	n := len(b)
-	p.done += int64(n)
-	if p.cb != nil {
-		p.cb(p.phase, p.done, p.total)
-	}
-	return n, nil
-}
-
 func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	n, err := b.body.Read(p)
 	if err != nil {
@@ -203,8 +187,7 @@ func RunWithContext(ctx context.Context, adamId string, playlistUrl string, outf
 		body = do.Body
 	}
 
-	var totalLen int64
-	totalLen = do.ContentLength
+	totalLen := do.ContentLength
 	// connect to decryptor
 	//addr := fmt.Sprintf("127.0.0.1:10020")
 	addr := Config.DecryptM3u8Port

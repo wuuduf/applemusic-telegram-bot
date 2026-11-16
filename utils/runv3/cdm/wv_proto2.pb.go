@@ -4,6 +4,8 @@
 // 	protoc        v3.12.4
 // source: wv_proto2.proto
 
+//lint:file-ignore SA1019 generated code; regenerate with a current protoc-gen-go to drop the deprecated call.
+
 package wv
 
 import (

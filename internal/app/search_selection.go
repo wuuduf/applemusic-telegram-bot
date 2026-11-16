@@ -80,13 +80,13 @@ func (b *TelegramBot) handleArtistModeSelection(chatID int64, messageID int, rel
 	)
 	switch normalizedRelationship {
 	case "albums":
-		items, hasNext, err = apputils.FetchArtistAlbums(pending.Storefront, pending.ArtistID, b.appleToken, b.searchLimit, 0, b.searchLanguage())
+		items, hasNext, err = apputils.FetchArtistAlbums(pending.Storefront, pending.ArtistID, b.currentAppleToken(), b.searchLimit, 0, b.searchLanguage())
 		kind = "artist_album"
 		if err == nil {
 			text = apputils.FormatArtistAlbums(pending.ArtistName, items)
 		}
 	case "music-videos":
-		items, hasNext, err = apputils.FetchArtistMusicVideos(pending.Storefront, pending.ArtistID, b.appleToken, b.searchLimit, 0, b.searchLanguage())
+		items, hasNext, err = apputils.FetchArtistMusicVideos(pending.Storefront, pending.ArtistID, b.currentAppleToken(), b.searchLimit, 0, b.searchLanguage())
 		kind = "artist_mv"
 		if err == nil {
 			text = apputils.FormatArtistMusicVideos(pending.ArtistName, items)
@@ -179,7 +179,7 @@ func (b *TelegramBot) handleDirectSongDownload(chatID int64, query string, reply
 
 func (b *TelegramBot) fetchSearchPage(kind string, query string, offset int) ([]apputils.SearchResultItem, bool, error) {
 	apiType := kind + "s"
-	resp, err := ampapi.Search(Config.Storefront, query, apiType, b.searchLanguage(), b.appleToken, b.searchLimit, offset)
+	resp, err := ampapi.Search(Config.Storefront, query, apiType, b.searchLanguage(), b.currentAppleToken(), b.searchLimit, offset)
 	if err != nil {
 		return nil, false, err
 	}
@@ -344,7 +344,7 @@ func (b *TelegramBot) handlePage(chatID int64, messageID int, delta int) {
 		if storefront == "" {
 			storefront = Config.Storefront
 		}
-		items, hasNext, err = apputils.FetchArtistAlbums(storefront, pending.Query, b.appleToken, b.searchLimit, newOffset, b.searchLanguage())
+		items, hasNext, err = apputils.FetchArtistAlbums(storefront, pending.Query, b.currentAppleToken(), b.searchLimit, newOffset, b.searchLanguage())
 		if err != nil {
 			_ = b.editMessageText(chatID, messageID, fmt.Sprintf("Failed to load artist albums: %v", err), nil)
 			return
@@ -358,7 +358,7 @@ func (b *TelegramBot) handlePage(chatID int64, messageID int, delta int) {
 		if storefront == "" {
 			storefront = Config.Storefront
 		}
-		items, hasNext, err = apputils.FetchArtistMusicVideos(storefront, pending.Query, b.appleToken, b.searchLimit, newOffset, b.searchLanguage())
+		items, hasNext, err = apputils.FetchArtistMusicVideos(storefront, pending.Query, b.currentAppleToken(), b.searchLimit, newOffset, b.searchLanguage())
 		if err != nil {
 			_ = b.editMessageText(chatID, messageID, fmt.Sprintf("Failed to load artist music videos: %v", err), nil)
 			return

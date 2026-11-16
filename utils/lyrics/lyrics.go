@@ -56,10 +56,6 @@ func GetWithContext(ctx context.Context, storefront, songId, lrcType, language, 
 	return lrc, nil
 }
 
-func getSongLyrics(songId string, storefront string, token string, userToken string, lrcType string, language string) (string, error) {
-	return getSongLyricsWithContext(context.Background(), songId, storefront, token, userToken, lrcType, language)
-}
-
 func getSongLyricsWithContext(ctx context.Context, songId string, storefront string, token string, userToken string, lrcType string, language string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET",
 		fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/songs/%s/%s?l=%s&extend=ttmlLocalizations", storefront, songId, lrcType, language), nil)

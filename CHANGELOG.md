@@ -16,6 +16,12 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- CI runs staticcheck (pinned to v0.8.2). Removed the unused code it reported (37 functions/types left behind by earlier refactors) and fixed the remaining findings; retries of Apple API network errors now key on timeouts only, since `net.Error.Temporary` is deprecated.
+- Upgrade to Go 1.26.11 (go.mod toolchain, CI, both Dockerfiles) for GO-2026-6859 in `net/http`, which govulncheck reports against 1.26.10.
+- A graceful stop or restart no longer forgets queued tasks: requests that had not started, and the one cut short by the shutdown, stay in the saved state and are re-queued on the next start (previously this only worked after a hard kill).
+- The Apple web token is fetched on demand from the shared cache for every request, so lyrics and playback requests follow a refresh too instead of waiting for the next restart. A configured `authorization-token` is still used as given.
+- Optional `telegram-cache-max-age-days` (default 0 = keep forever): drop file_id cache entries not written for that many days at startup.
+- Experimental `telegram-download-concurrency` (default 1 = unchanged, strictly serial): let up to 4 downloads run in the download core at once. Downloads of the same item stay serialized; the wrapper must accept several decrypt connections, and a single song plus the album that contains it can still write the same file at the same time.
 - Search results are now charged against the per-user limiter when one is picked. Search commands are free, so search + tap used to start unlimited downloads.
 - **Behavior change:** the global worker limit (`/settings workerN` and the settings-panel buttons) can only be changed by admins (`telegram-admin-user-ids`); previously any allowed user could change it.
 - The wrapper sockets are bounded: the decrypt connection has per-phase deadlines and follows task cancellation, and the device m3u8 lookup has a dial timeout and a 30s deadline. A stalled wrapper could previously block every download.

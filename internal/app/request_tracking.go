@@ -357,10 +357,6 @@ func (b *TelegramBot) enqueueTelegramTask(req *downloadRequest) bool {
 	return b.enqueueTaskRequest(req, "Resource pressure detected. New tasks are temporarily blocked.", "Task queue is full. Please try again later.")
 }
 
-func (b *TelegramBot) runQueuedRequest(req *downloadRequest) {
-	b.runQueuedRequestWithContext(req, b.operationContext())
-}
-
 func (b *TelegramBot) runQueuedRequestWithContext(req *downloadRequest, ctx context.Context) {
 	if req == nil {
 		return

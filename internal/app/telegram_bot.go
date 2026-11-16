@@ -7,10 +7,46 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/cmdrunner"
 )
 
-func newTelegramBot(token, appleToken string) *TelegramBot {
+// currentAppleToken returns the Apple web token to use for a request. When the
+// token was obtained automatically it comes from the shared ampapi cache, which
+// replaces it as it ages or expires, so every caller (lyrics and playback
+// requests included) follows a refresh instead of keeping the startup token.
+// A configured authorization-token is used as given.
+func (b *TelegramBot) currentAppleToken() string {
+	if b == nil {
+		return ""
+	}
+	if !b.appleTokenAuto {
+		return b.appleToken
+	}
+	b.appleTokenMu.Lock()
+	defer b.appleTokenMu.Unlock()
+	now := time.Now()
+	if now.Before(b.appleTokenRetryAt) {
+		return b.appleToken
+	}
+	ctx, cancel := context.WithTimeout(b.operationContext(), appleTokenRefreshTimeout)
+	defer cancel()
+	fresh, err := ampapi.GetTokenWithContext(ctx)
+	if err != nil || strings.TrimSpace(fresh) == "" {
+		// Keep the last good token and do not retry on every request.
+		b.appleTokenRetryAt = now.Add(appleTokenRetryInterval)
+		return b.appleToken
+	}
+	b.appleToken = fresh
+	return fresh
+}
+
+const (
+	appleTokenRefreshTimeout = 20 * time.Second
+	appleTokenRetryInterval  = time.Minute
+)
+
+func newTelegramBot(token, appleToken string, appleTokenAuto bool) *TelegramBot {
 	allowed := buildIDSet(Config.TelegramAllowedChatIDs)
 	admins := buildIDSet(Config.TelegramAdminUserIDs)
 	searchLimit := Config.TelegramSearchLimit
@@ -51,6 +87,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		apiBase:                 apiBase,
 		proxyInfo:               proxyInfo,
 		appleToken:              appleToken,
+		appleTokenAuto:          appleTokenAuto,
 		client:                  newTelegramHTTPClient(apiTimeout, proxyFunc),
 		pollClient:              newTelegramHTTPClient(pollTimeout, proxyFunc),
 		allowedChats:            allowed,
@@ -73,6 +110,7 @@ func newTelegramBot(token, appleToken string) *TelegramBot {
 		pendingArtistModes:      make(map[int64]map[int]*PendingArtistMode),
 		downloadQueue:           make(chan *downloadRequest, queueSize),
 		workerLimit:             defaultTaskWorkerLimit,
+		downloadCore:            newDownloadCoreGate(telegramDownloadConcurrency()),
 		cacheFile:               cacheFile,
 		stateFile:               stateFile,
 		cache:                   make(map[string]CachedAudio),

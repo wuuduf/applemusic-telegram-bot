@@ -290,3 +290,107 @@ func TestRecoveryDropsRequestThatKeepsCrashing(t *testing.T) {
 		t.Fatalf("inflight key of the dropped request must be released")
 	}
 }
+
+func TestDownloadCoreGateLimitsAndSerializesSameItem(t *testing.T) {
+	gate := newDownloadCoreGate(2)
+	var mu sync.Mutex
+	running, peak := 0, 0
+	sameItemRunning, sameItemOverlap := 0, false
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		key := fmt.Sprintf("album:%d", i)
+		same := i%3 == 0
+		if same {
+			key = "album:shared"
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release := gate.acquire(key)
+			mu.Lock()
+			running++
+			if running > peak {
+				peak = running
+			}
+			if same {
+				sameItemRunning++
+				if sameItemRunning > 1 {
+					sameItemOverlap = true
+				}
+			}
+			mu.Unlock()
+			time.Sleep(3 * time.Millisecond)
+			mu.Lock()
+			running--
+			if same {
+				sameItemRunning--
+			}
+			mu.Unlock()
+			release()
+			release() // double release must be harmless
+		}()
+	}
+	wg.Wait()
+	if peak > 2 {
+		t.Fatalf("limit 2 exceeded: %d downloads ran at once", peak)
+	}
+	if sameItemOverlap {
+		t.Fatalf("two downloads of the same item overlapped")
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if len(gate.keys) != 0 {
+		t.Fatalf("key locks leaked: %d", len(gate.keys))
+	}
+}
+
+func TestPruneExpiredCacheKeepsFreshAndUndatedEntries(t *testing.T) {
+	now := time.Now()
+	b := &TelegramBot{
+		cache: map[string]CachedAudio{
+			"old":     {FileID: "a", UpdatedAt: now.Add(-40 * 24 * time.Hour)},
+			"fresh":   {FileID: "b", UpdatedAt: now.Add(-time.Hour)},
+			"undated": {FileID: "c"},
+		},
+		docCache:   map[string]CachedDocument{"old-doc": {FileID: "d", UpdatedAt: now.Add(-40 * 24 * time.Hour)}},
+		videoCache: map[string]CachedVideo{"fresh-video": {FileID: "e", UpdatedAt: now}},
+	}
+	if removed := b.pruneExpiredCacheLocked(0, now); removed != 0 {
+		t.Fatalf("max age 0 must keep everything, removed %d", removed)
+	}
+	if removed := b.pruneExpiredCacheLocked(30*24*time.Hour, now); removed != 2 {
+		t.Fatalf("expected 2 expired entries, removed %d", removed)
+	}
+	if _, ok := b.cache["old"]; ok {
+		t.Fatalf("expired audio entry kept")
+	}
+	if len(b.cache) != 2 || len(b.docCache) != 0 || len(b.videoCache) != 1 {
+		t.Fatalf("unexpected cache contents after prune")
+	}
+}
+
+func TestShutdownKeepsQueuedRequestForRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	b := &TelegramBot{
+		downloadQueue:     make(chan *downloadRequest, 2),
+		workerLimit:       1,
+		inflightDownloads: make(map[string]struct{}),
+		activeRequests:    map[string]telegramPersistedRequest{"queued-1": {RequestID: "queued-1", State: "queued"}},
+		shutdownCtx:       ctx,
+		shutdownCancel:    cancel,
+	}
+	b.queueCond = sync.NewCond(&b.queueMu)
+	b.downloadQueue <- &downloadRequest{requestID: "queued-1", taskType: telegramTaskCover, mediaType: mediaTypeAlbum, mediaID: "1",
+		run: func(*TelegramBot, context.Context) error {
+			t.Errorf("queued task must not run during shutdown")
+			return nil
+		}}
+	cancel()
+	b.startDownloadWorker()
+	b.stopDownloadWorkers()
+	b.requestStateMu.Lock()
+	defer b.requestStateMu.Unlock()
+	if _, ok := b.activeRequests["queued-1"]; !ok {
+		t.Fatalf("a request skipped by shutdown must stay tracked so the next start re-queues it")
+	}
+}

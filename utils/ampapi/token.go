@@ -23,6 +23,12 @@ func GetToken() (string, error) {
 	return getTokenWithContext(context.Background(), false)
 }
 
+// GetTokenWithContext returns the cached token, fetching a new one when the
+// cache is empty, older than its TTL or expired.
+func GetTokenWithContext(ctx context.Context) (string, error) {
+	return getTokenWithContext(ctx, false)
+}
+
 func getTokenWithContext(ctx context.Context, force bool) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()

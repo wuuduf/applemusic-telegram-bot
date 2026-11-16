@@ -16,14 +16,6 @@ func runExternalCommand(ctx context.Context, name string, args ...string) (cmdru
 	return result, err
 }
 
-func runExternalCommandInDir(ctx context.Context, dir string, name string, args ...string) (cmdrunner.Result, error) {
-	result, err := cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{Dir: dir})
-	if cmdrunner.IsTimeout(err) {
-		appRuntimeMetrics.recordExternalCommandTimeout()
-	}
-	return result, err
-}
-
 func runMP4BoxWithTags(ctx context.Context, tags []string, args ...string) (cmdrunner.Result, error) {
 	if len(tags) == 0 {
 		return runExternalCommand(ctx, "MP4Box", args...)

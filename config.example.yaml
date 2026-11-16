@@ -71,6 +71,8 @@ telegram-api-url: ""              # Optional API base URL override (default: htt
 telegram-http-timeout-sec: 180    # Telegram API request timeout for send/edit/upload calls
 telegram-poll-timeout-sec: 75     # getUpdates long-poll HTTP timeout (should be > 30)
 telegram-update-concurrency: 8    # Max messages/callbacks handled at once across chats (same chat stays in order; 1 = fully serial, max 64)
+telegram-cache-max-age-days: 0    # On startup, drop file_id cache entries not written for this many days. 0 = keep forever.
+telegram-download-concurrency: 1  # Downloads running at once in the download core (1-4). 1 = strictly serial (default). Higher values are experimental: your wrapper must accept several decrypt connections at once; downloads of the same album/song are still serialized.
 telegram-caption-signature: ""    # Last line of audio/MV captions. Empty = "via @<this bot's username>" (from getMe); "-" = no signature; any other text is used as-is.
 telegram-sync-command-menu: false # On startup, publish the /help command list as the Telegram "/" menu (zh default + en). Replaces the menu set in BotFather.
 telegram-daily-restart-enabled: true # Auto restart bot runtime at local 00:00 (recommended for long-running stability)

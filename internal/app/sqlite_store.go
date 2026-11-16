@@ -267,23 +267,6 @@ func fullCacheChanges(audio map[string]CachedAudio, docs map[string]CachedDocume
 	return changes
 }
 
-// replaceCache swaps the whole cache for the given maps in one transaction.
-func (s *telegramStore) replaceCache(audio map[string]CachedAudio, docs map[string]CachedDocument, videos map[string]CachedVideo) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec("DELETE FROM cache_entries"); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if err := applyCacheChangesTx(tx, fullCacheChanges(audio, docs, videos)); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
-
 // --- runtime state -------------------------------------------------------
 
 func (s *telegramStore) loadRuntimeState() (telegramPersistedState, bool, error) {

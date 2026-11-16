@@ -510,7 +510,7 @@ func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, ta
 	case mediaTypeArtist:
 		artistName := ""
 		if target.RawURL != "" {
-			if name, _, err := getUrlArtistName(target.RawURL, b.appleToken); err == nil {
+			if name, _, err := getUrlArtistName(target.RawURL, b.currentAppleToken()); err == nil {
 				artistName = name
 			}
 		}
@@ -518,7 +518,7 @@ func (b *TelegramBot) handleURLTargetWithOptions(chatID int64, replyToID int, ta
 	case mediaTypeCurator:
 		curatorName := ""
 		if target.RawURL != "" {
-			if name, _, err := getUrlCuratorName(target.RawURL, b.appleToken); err == nil {
+			if name, _, err := getUrlCuratorName(target.RawURL, b.currentAppleToken()); err == nil {
 				curatorName = name
 			}
 		}

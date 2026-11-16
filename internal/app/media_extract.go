@@ -33,14 +33,6 @@ var (
 // so a stalled wrapper cannot hold the download core lock forever.
 const deviceM3u8Timeout = 30 * time.Second
 
-func extractMvAudio(c string) (string, error) {
-	return extractMvAudioWithConfig(c, Config)
-}
-
-func extractMvAudioWithConfig(c string, cfg structs.ConfigSet) (string, error) {
-	return extractMvAudioWithContext(context.Background(), c, cfg)
-}
-
 func extractMvAudioWithContext(ctx context.Context, c string, cfg structs.ConfigSet) (string, error) {
 	MediaUrl, err := url.Parse(c)
 	if err != nil {

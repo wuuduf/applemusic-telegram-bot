@@ -37,6 +37,9 @@ type progressWriter struct {
 	done  int64
 }
 
+// ctxKey is the type of the values this package stores in a context.
+type ctxKey string
+
 // ErrUnavailable means Apple has no playable asset for the requested track.
 var ErrUnavailable = errors.New("Unavailable")
 
@@ -84,8 +87,8 @@ func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byt
 	jsondata := map[string]interface{}{
 		"challenge":      base64.StdEncoding.EncodeToString(body), // 'body' is passed in directly
 		"key-system":     "com.widevine.alpha",
-		"uri":            ctx.Value("uriPrefix").(string) + "," + ctx.Value("pssh").(string),
-		"adamId":         ctx.Value("adamId").(string),
+		"uri":            ctx.Value(ctxKey("uriPrefix")).(string) + "," + ctx.Value(ctxKey("pssh")).(string),
+		"adamId":         ctx.Value(ctxKey("adamId")).(string),
 		"isLibrary":      false,
 		"user-initiated": true,
 	}
@@ -268,10 +271,6 @@ func extractKidBase64WithContext(ctx context.Context, b string, mvmode bool) (st
 	}
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
-func extsong(b string, progress ProgressFunc) bytes.Buffer {
-	return extsongWithContext(context.Background(), b, progress)
-}
-
 func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) bytes.Buffer {
 	resp, err := nethttp.GetWithContext(ctx, b)
 	var buffer bytes.Buffer
@@ -344,9 +343,9 @@ func RunWithContext(ctx context.Context, adamId string, trackpath string, authto
 			return "", err
 		}
 	}
-	ctx = context.WithValue(ctx, "pssh", kidBase64)
-	ctx = context.WithValue(ctx, "adamId", adamId)
-	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
+	ctx = context.WithValue(ctx, ctxKey("pssh"), kidBase64)
+	ctx = context.WithValue(ctx, ctxKey("adamId"), adamId)
+	ctx = context.WithValue(ctx, ctxKey("uriPrefix"), uriPrefix)
 	pssh, err := getPSSH("", kidBase64)
 	//fmt.Println(pssh)
 	if err != nil {

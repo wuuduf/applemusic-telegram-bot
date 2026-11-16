@@ -728,19 +728,19 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 	switch mediaType {
 	case mediaTypeSong:
 		return func(session *DownloadSession) error {
-			return ripSong(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+			return ripSong(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		}, nil
 	case mediaTypeAlbum:
 		return func(session *DownloadSession) error {
-			return ripAlbum(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken, "")
+			return ripAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
 		}, nil
 	case mediaTypePlaylist:
 		return func(session *DownloadSession) error {
-			return ripPlaylist(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+			return ripPlaylist(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		}, nil
 	case mediaTypeStation:
 		return func(session *DownloadSession) error {
-			return ripStation(session, mediaID, b.appleToken, storefront, session.Config.MediaUserToken)
+			return ripStation(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		}, nil
 	case mediaTypeArtistSongs:
 		return func(session *DownloadSession) error {
@@ -760,7 +760,7 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 			saveDir = "AM-DL downloads"
 		}
 		return func(session *DownloadSession) error {
-			return mvDownloader(session, mediaID, saveDir, b.appleToken, storefront, session.Config.MediaUserToken, nil, mvVariantURL, mvVariantKey, mvVariantTag)
+			return mvDownloader(session, mediaID, saveDir, b.currentAppleToken(), storefront, session.Config.MediaUserToken, nil, mvVariantURL, mvVariantKey, mvVariantTag)
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported media type: %s", mediaType)

@@ -468,7 +468,7 @@ func (b *TelegramBot) sendAudioFile(session *DownloadSession, chatID int64, file
 	}
 	if info.Size() > b.maxFileBytes {
 		if format != telegramFormatFlac {
-			return fmt.Errorf("%s file exceeds Telegram limit (%dMB). Use /settings flac, lower quality, or raise telegram-max-file-mb.", strings.ToUpper(format), b.maxFileBytes/1024/1024)
+			return fmt.Errorf("%s file exceeds Telegram limit (%dMB). Use /settings flac, lower quality, or raise telegram-max-file-mb", strings.ToUpper(format), b.maxFileBytes/1024/1024)
 		}
 		if status != nil {
 			status.Update("Compressing", 0, 0)

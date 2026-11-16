@@ -98,6 +98,7 @@ func (b *TelegramBot) loadCache() {
 			logErrorf("telegram cache load failed (%s): %v", b.store.path, err)
 		}
 		b.cache, b.docCache, b.videoCache = audio, docs, videos
+		b.pruneExpiredCacheOnLoadLocked()
 		return
 	}
 	target := strings.TrimSpace(b.cacheFile)
@@ -109,9 +110,72 @@ func (b *TelegramBot) loadCache() {
 		return
 	}
 	b.cache, b.docCache, b.videoCache = audio, docs, videos
-	if rewrite {
+	if b.pruneExpiredCacheOnLoadLocked() == 0 && rewrite {
 		b.saveCacheLocked()
 	}
+}
+
+// telegramCacheMaxAge is how long an unused file_id cache entry is kept;
+// zero keeps entries forever (the default).
+func telegramCacheMaxAge() time.Duration {
+	days := Config.TelegramCacheMaxAgeDays
+	if days <= 0 {
+		return 0
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// pruneExpiredCacheOnLoadLocked applies telegram-cache-max-age-days and
+// persists the result. Caller holds cacheMu.
+func (b *TelegramBot) pruneExpiredCacheOnLoadLocked() int {
+	removed := b.pruneExpiredCacheLocked(telegramCacheMaxAge(), time.Now())
+	if removed > 0 {
+		logInfof("telegram cache: dropped %d entries older than %d days", removed, Config.TelegramCacheMaxAgeDays)
+		b.saveCacheLocked()
+	}
+	return removed
+}
+
+// pruneExpiredCacheLocked removes entries last written more than maxAge ago.
+// Entries without a timestamp (written by old versions) are kept. Caller
+// holds cacheMu.
+func (b *TelegramBot) pruneExpiredCacheLocked(maxAge time.Duration, now time.Time) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	cutoff := now.Add(-maxAge)
+	expired := func(stamps ...time.Time) bool {
+		var latest time.Time
+		for _, stamp := range stamps {
+			if stamp.After(latest) {
+				latest = stamp
+			}
+		}
+		return !latest.IsZero() && latest.Before(cutoff)
+	}
+	removed := 0
+	for key, entry := range b.cache {
+		if expired(entry.UpdatedAt, entry.CreatedAt) {
+			delete(b.cache, key)
+			b.markCacheDirtyLocked(cacheKindAudio, key)
+			removed++
+		}
+	}
+	for key, entry := range b.docCache {
+		if expired(entry.UpdatedAt) {
+			delete(b.docCache, key)
+			b.markCacheDirtyLocked(cacheKindDocument, key)
+			removed++
+		}
+	}
+	for key, entry := range b.videoCache {
+		if expired(entry.UpdatedAt) {
+			delete(b.videoCache, key)
+			b.markCacheDirtyLocked(cacheKindVideo, key)
+			removed++
+		}
+	}
+	return removed
 }
 
 // readLegacyCacheFile parses a JSON cache file, upgrading older layouts. It
@@ -529,7 +593,7 @@ func (b *TelegramBot) fetchTrackMetaWithStorefront(trackID string, storefront st
 		return AudioMeta{}, fmt.Errorf("empty track id")
 	}
 	storefront = normalizeSongCommentStorefront(storefront)
-	resp, err := ampapi.GetSongResp(storefront, trackID, b.searchLanguage(), b.appleToken)
+	resp, err := ampapi.GetSongResp(storefront, trackID, b.searchLanguage(), b.currentAppleToken())
 	if err != nil || resp == nil {
 		if err != nil {
 			return AudioMeta{}, err

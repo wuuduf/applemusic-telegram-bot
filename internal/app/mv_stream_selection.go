@@ -55,7 +55,7 @@ func (b *TelegramBot) validateMusicVideoRequest(chatID int64, mvID string, store
 }
 
 func (b *TelegramBot) promptMusicVideoStreamSelection(chatID int64, mvID string, storefront string, replyToID int, forceRefresh bool) {
-	masterURL, _, _, err := runv3.GetWebplaybackWithContext(b.operationContext(), mvID, b.appleToken, Config.MediaUserToken, true)
+	masterURL, _, _, err := runv3.GetWebplaybackWithContext(b.operationContext(), mvID, b.currentAppleToken(), Config.MediaUserToken, true)
 	if err != nil {
 		_ = b.sendMessageWithReply(chatID, fmt.Sprintf("Failed to load MV streams: %v", err), nil, replyToID)
 		return
@@ -180,13 +180,6 @@ func (b *TelegramBot) getPendingMVStream(chatID int64, messageID int) (*PendingM
 	}
 	pending, ok := chatPending[messageID]
 	return pending, ok
-}
-
-func (b *TelegramBot) clearPendingMVStream(chatID int64) {
-	b.mvStreamMu.Lock()
-	delete(b.pendingMVStreams, chatID)
-	b.mvStreamMu.Unlock()
-	b.requestStateSave()
 }
 
 func (b *TelegramBot) clearPendingMVStreamByMessage(chatID int64, messageID int) {

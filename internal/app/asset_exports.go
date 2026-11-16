@@ -22,18 +22,6 @@ type artworkFetchResult struct {
 	MotionURL   string
 }
 
-type artistProfileResponse struct {
-	Data []struct {
-		ID         string `json:"id"`
-		Attributes struct {
-			Name    string `json:"name"`
-			Artwork struct {
-				URL string `json:"url"`
-			} `json:"artwork"`
-		} `json:"attributes"`
-	} `json:"data"`
-}
-
 func (b *TelegramBot) fetchArtwork(target *AppleURLTarget) (artworkFetchResult, error) {
 	if target == nil {
 		return artworkFetchResult{}, fmt.Errorf("invalid target")
@@ -109,10 +97,6 @@ func (b *TelegramBot) saveAnimatedCoverWithContext(ctx context.Context, motionUR
 	return nil
 }
 
-func (b *TelegramBot) exportArtistAssets(chatID int64, replyToID int, artistID string, storefront string, transferMode string) {
-	b.exportArtistAssetsWithContext(b.operationContext(), chatID, replyToID, artistID, storefront, transferMode)
-}
-
 func (b *TelegramBot) exportArtistAssetsWithContext(ctx context.Context, chatID int64, replyToID int, artistID string, storefront string, transferMode string) {
 	if ctx == nil {
 		ctx = b.operationContext()
@@ -175,7 +159,7 @@ func (b *TelegramBot) exportArtistAssetsWithContext(ctx context.Context, chatID 
 	}
 
 	status.Update("Loading artist albums", 0, 0)
-	albums, _, err := apputils.FetchArtistAlbums(storefront, artistID, b.appleToken, 0, 0, b.searchLanguage())
+	albums, _, err := apputils.FetchArtistAlbums(storefront, artistID, b.currentAppleToken(), 0, 0, b.searchLanguage())
 	if err != nil {
 		status.UpdateSync(fmt.Sprintf("Failed to load artist albums: %v", err), 0, 0)
 		return
@@ -306,10 +290,6 @@ func (b *TelegramBot) exportArtistAssetsWithContext(ctx context.Context, chatID 
 	}
 }
 
-func (b *TelegramBot) handleCoverOnly(chatID int64, replyToID int, target *AppleURLTarget, artistOnly bool) {
-	b.handleCoverOnlyWithContext(b.operationContext(), chatID, replyToID, target, artistOnly)
-}
-
 func (b *TelegramBot) handleCoverOnlyWithContext(ctx context.Context, chatID int64, replyToID int, target *AppleURLTarget, artistOnly bool) {
 	if ctx == nil {
 		ctx = b.operationContext()
@@ -358,10 +338,6 @@ func (b *TelegramBot) enqueueCoverTask(chatID int64, replyToID int, target *Appl
 		storefront:   resolveStorefront(target),
 		requestID:    b.nextRequestID(),
 	})
-}
-
-func (b *TelegramBot) handleAnimatedCoverOnly(chatID int64, replyToID int, target *AppleURLTarget) {
-	b.handleAnimatedCoverOnlyWithContext(b.operationContext(), chatID, replyToID, target)
 }
 
 func (b *TelegramBot) handleAnimatedCoverOnlyWithContext(ctx context.Context, chatID int64, replyToID int, target *AppleURLTarget) {
@@ -515,14 +491,6 @@ func uniqueName(existing map[string]struct{}, candidate string) string {
 	return candidate
 }
 
-func (b *TelegramBot) exportAlbumLyrics(chatID int64, replyToID int, albumID string, storefront string, transferMode string) {
-	b.exportAlbumLyricsWithSettings(chatID, replyToID, albumID, storefront, transferMode, b.getChatSettings(chatID))
-}
-
-func (b *TelegramBot) exportAlbumLyricsWithSettings(chatID int64, replyToID int, albumID string, storefront string, transferMode string, settings ChatDownloadSettings) {
-	b.exportAlbumLyricsWithSettingsAndContext(b.operationContext(), chatID, replyToID, albumID, storefront, transferMode, settings)
-}
-
 func (b *TelegramBot) exportAlbumLyricsWithSettingsAndContext(ctx context.Context, chatID int64, replyToID int, albumID string, storefront string, transferMode string, settings ChatDownloadSettings) {
 	if ctx == nil {
 		ctx = b.operationContext()
@@ -626,14 +594,6 @@ func (b *TelegramBot) exportAlbumLyricsWithSettingsAndContext(ctx context.Contex
 	}
 }
 
-func (b *TelegramBot) handleLyricsOnly(chatID int64, replyToID int, target *AppleURLTarget) {
-	b.handleLyricsOnlyWithSettings(chatID, replyToID, target, b.getChatSettings(chatID))
-}
-
-func (b *TelegramBot) handleLyricsOnlyWithSettings(chatID int64, replyToID int, target *AppleURLTarget, settings ChatDownloadSettings) {
-	b.handleLyricsOnlyWithSettingsAndContext(b.operationContext(), chatID, replyToID, target, settings)
-}
-
 func (b *TelegramBot) handleLyricsOnlyWithSettingsAndContext(ctx context.Context, chatID int64, replyToID int, target *AppleURLTarget, settings ChatDownloadSettings) {
 	if ctx == nil {
 		ctx = b.operationContext()
@@ -659,7 +619,7 @@ func (b *TelegramBot) handleLyricsOnlyWithSettingsAndContext(ctx context.Context
 		return
 	}
 	baseName := "song-" + songID
-	if songResp, err := ampapi.GetSongRespWithContext(ctx, storefront, songID, Config.Language, b.appleToken); err == nil {
+	if songResp, err := ampapi.GetSongRespWithContext(ctx, storefront, songID, Config.Language, b.currentAppleToken()); err == nil {
 		item, dataErr := firstSongData("main.telegram.handleLyricsOnly", songResp)
 		if dataErr == nil {
 			if title := composeArtistTitle(item.Attributes.ArtistName, item.Attributes.Name); strings.TrimSpace(title) != "" {

@@ -101,6 +101,14 @@ type ConfigSet struct {
 	// (setMyCommands). Off by default because it replaces BotFather's menu.
 	TelegramSyncCommandMenu bool `yaml:"telegram-sync-command-menu"`
 
+	// Drop file_id cache entries not written for this many days when the bot
+	// starts. 0 (default) keeps them forever.
+	TelegramCacheMaxAgeDays int `yaml:"telegram-cache-max-age-days"`
+
+	// How many downloads may run in the download core at once. 1 (default)
+	// keeps downloads strictly serial; uploads always run per worker.
+	TelegramDownloadConcurrency int `yaml:"telegram-download-concurrency"`
+
 	// Last line of media captions. Empty signs with the bot's own username
 	// ("via @<username>", read from getMe); "-" disables the line.
 	TelegramCaptionSignature string `yaml:"telegram-caption-signature"`

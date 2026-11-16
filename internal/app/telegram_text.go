@@ -202,14 +202,3 @@ func (b *TelegramBot) localizeOutgoingText(chatID int64, text string) string {
 	}
 	return text
 }
-
-func formatChatIDTextLegacy(chatID int64) string {
-	return fmt.Sprintf(
-		"Session ID (chat_id): %d\n"+
-			"Use this value in config.yaml whitelist:\n"+
-			"telegram-allowed-chat-ids:\n"+
-			"  - %d",
-		chatID,
-		chatID,
-	)
-}

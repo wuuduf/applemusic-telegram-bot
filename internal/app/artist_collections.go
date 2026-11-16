@@ -14,7 +14,7 @@ import (
 
 func (b *TelegramBot) catalogService() *sharedcatalog.Service {
 	return &sharedcatalog.Service{
-		AppleToken:     b.appleToken,
+		AppleToken:     b.currentAppleToken(),
 		MediaUserToken: Config.MediaUserToken,
 		Language:       Config.Language,
 		HTTPClient:     b.client,
@@ -171,7 +171,7 @@ func (b *TelegramBot) stageArtistLPAlbumsCollection(session *DownloadSession, ar
 		if albumID == "" {
 			continue
 		}
-		if err := ripAlbum(session, albumID, b.appleToken, storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -201,7 +201,7 @@ func (b *TelegramBot) stageCuratorAlbumsCollection(session *DownloadSession, cur
 		if albumID == "" {
 			continue
 		}
-		if err := ripAlbum(session, albumID, b.appleToken, storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -227,7 +227,7 @@ func (b *TelegramBot) downloadArtistSongsCollection(session *DownloadSession, ar
 		if err := session.downloadContext().Err(); err != nil {
 			return err
 		}
-		if err := ripSong(session, trackID, b.appleToken, storefront, session.Config.MediaUserToken); err != nil {
+		if err := ripSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -291,10 +291,6 @@ func (b *TelegramBot) sendPreparedDownloadPaths(session *DownloadSession, chatID
 	return sentAny
 }
 
-func (b *TelegramBot) runArtistLPAlbumZipTransfer(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, albumID string, storefront string, status *DownloadStatus, progress func(phase string, done, total int64)) (bool, error) {
-	return b.runArtistLPAlbumZipTransferWithContext(b.operationContext(), chatID, replyToID, forceRefresh, settings, albumID, storefront, status, progress)
-}
-
 func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context, chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, albumID string, storefront string, status *DownloadStatus, progress func(phase string, done, total int64)) (bool, error) {
 	if !forceRefresh && b.trySendCachedBundleZip(chatID, mediaTypeAlbum, albumID, replyToID, settings) {
 		return true, nil
@@ -306,8 +302,8 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 		primaryCount int
 	)
 	coreErr := func() error {
-		b.downloadCoreMu.Lock()
-		defer b.downloadCoreMu.Unlock()
+		releaseCore := b.acquireDownloadCore(mediaTypeAlbum, albumID)
+		defer releaseCore()
 
 		var err error
 		session, err = b.prepareTelegramDownloadSessionWithContext(ctx, false, forceRefresh, settings, mediaTypeAlbum, progress)
@@ -317,7 +313,7 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 		if status != nil {
 			status.Update("Downloading", 0, 0)
 		}
-		if err := ripAlbum(session, albumID, b.appleToken, storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			return err
 		}
 
@@ -365,10 +361,6 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 	return true, nil
 }
 
-func (b *TelegramBot) runArtistLPAlbumTransfer(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, transferMode string, albumID string, storefront string, status *DownloadStatus, statusLabelPrefix string, progress func(phase string, done, total int64)) (bool, error) {
-	return b.runArtistLPAlbumTransferWithContext(b.operationContext(), chatID, replyToID, forceRefresh, settings, transferMode, albumID, storefront, status, statusLabelPrefix, progress)
-}
-
 func (b *TelegramBot) runArtistLPAlbumTransferWithContext(ctx context.Context, chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, transferMode string, albumID string, storefront string, status *DownloadStatus, statusLabelPrefix string, progress func(phase string, done, total int64)) (bool, error) {
 	switch transferMode {
 	case transferModeZip:
@@ -380,10 +372,6 @@ func (b *TelegramBot) runArtistLPAlbumTransferWithContext(ctx context.Context, c
 		}
 		return sentAny, err
 	}
-}
-
-func (b *TelegramBot) downloadArtistLPAlbumsCollection(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, artistID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {
-	return b.downloadArtistLPAlbumsCollectionWithContext(b.operationContext(), chatID, replyToID, forceRefresh, settings, artistID, storefront, transferMode, status)
 }
 
 func (b *TelegramBot) downloadArtistLPAlbumsCollectionWithContext(ctx context.Context, chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, artistID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {
@@ -452,10 +440,6 @@ func (b *TelegramBot) downloadArtistLPAlbumsCollectionWithContext(ctx context.Co
 		}
 	}
 	return result, nil
-}
-
-func (b *TelegramBot) downloadCuratorAlbumsCollection(chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, curatorID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {
-	return b.downloadCuratorAlbumsCollectionWithContext(b.operationContext(), chatID, replyToID, forceRefresh, settings, curatorID, storefront, transferMode, status)
 }
 
 func (b *TelegramBot) downloadCuratorAlbumsCollectionWithContext(ctx context.Context, chatID int64, replyToID int, forceRefresh bool, settings ChatDownloadSettings, curatorID string, storefront string, transferMode string, status *DownloadStatus) (albumCollectionDownloadResult, error) {

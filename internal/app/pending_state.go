@@ -41,13 +41,6 @@ func (b *TelegramBot) getPending(chatID int64, messageID int) (*PendingSelection
 	return pending, ok
 }
 
-func (b *TelegramBot) clearPending(chatID int64) {
-	b.pendingMu.Lock()
-	delete(b.pending, chatID)
-	b.pendingMu.Unlock()
-	b.requestStateSave()
-}
-
 func (b *TelegramBot) clearPendingByMessage(chatID int64, messageID int) {
 	if messageID == 0 {
 		return
@@ -99,13 +92,6 @@ func (b *TelegramBot) getPendingTransfer(chatID int64, messageID int) (*PendingT
 	return pending, ok
 }
 
-func (b *TelegramBot) clearPendingTransfer(chatID int64) {
-	b.transferMu.Lock()
-	delete(b.pendingTransfers, chatID)
-	b.transferMu.Unlock()
-	b.requestStateSave()
-}
-
 func (b *TelegramBot) clearPendingTransferByMessage(chatID int64, messageID int) {
 	if messageID == 0 {
 		return
@@ -153,13 +139,6 @@ func (b *TelegramBot) getPendingArtistMode(chatID int64, messageID int) (*Pendin
 	}
 	pending, ok := chatPending[messageID]
 	return pending, ok
-}
-
-func (b *TelegramBot) clearPendingArtistMode(chatID int64) {
-	b.artistModeMu.Lock()
-	delete(b.pendingArtistModes, chatID)
-	b.artistModeMu.Unlock()
-	b.requestStateSave()
 }
 
 func (b *TelegramBot) clearPendingArtistModeByMessage(chatID int64, messageID int) {

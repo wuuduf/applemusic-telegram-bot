@@ -20,13 +20,6 @@ type downloadFileEntry struct {
 	mode    string
 }
 
-func (b *TelegramBot) cleanupDownloadsIfNeeded() {
-	if b.cleanupTracker == nil {
-		return
-	}
-	b.cleanupTracker.cleanupOnce(false)
-}
-
 func telegramCleanupRoots() []sharedstorage.CleanupRoot {
 	return sharedstorage.TelegramCleanupRoots(&Config)
 }

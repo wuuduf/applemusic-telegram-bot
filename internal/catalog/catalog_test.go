@@ -499,3 +499,50 @@ func (t rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return next.RoundTrip(clone)
 }
+
+func TestCatalogRequestRetriesRateLimit(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"artist-1","attributes":{"name":"Artist One","artwork":{"url":"https://example.com/cover.jpg"}}}]}`)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{AppleToken: "token", HTTPClient: client}
+	name, _, err := service.FetchArtistProfile("us", "artist-1")
+	if err != nil || name != "Artist One" {
+		t.Fatalf("expected success after one retry, got name=%q err=%v", name, err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 requests, got %d", calls)
+	}
+}
+
+func TestArtistCollectionStopsWhenNextLinkDoesNotAdvance(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		// "next" points back at the very same page.
+		_, _ = io.WriteString(w, `{"next":"`+r.URL.RequestURI()+`","data":[{"id":"song-1","attributes":{"name":"Song"}}]}`)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = rewriteTransport{base: server.URL, next: client.Transport}
+	service := &Service{AppleToken: "token", HTTPClient: client}
+	items, err := service.FetchArtistRelationshipAll("us", "artist-1", "songs")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls > 3 || len(items) > 3 {
+		t.Fatalf("listing looped on a non-advancing next link: calls=%d items=%d", calls, len(items))
+	}
+}

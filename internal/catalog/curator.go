@@ -173,7 +173,7 @@ func (s *Service) fetchCuratorPage(storefront string, curatorID string) (*curato
 	}
 	req.URL.RawQuery = query.Encode()
 
-	resp, err := s.client().Do(req)
+	resp, err := s.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func (s *Service) fetchCuratorRoomAlbumsAll(storefront string, roomID string) ([
 	pageURL := curatorRoomContentsURL(storefront, roomID)
 	pageLimit := 100
 	items := make([]CuratorAlbumItem, 0)
-	for {
+	for pageCount := 1; ; pageCount++ {
 		req, err := http.NewRequest("GET", pageURL, nil)
 		if err != nil {
 			return nil, err
@@ -239,7 +239,7 @@ func (s *Service) fetchCuratorRoomAlbumsAll(storefront string, roomID string) ([
 		}
 		req.URL.RawQuery = query.Encode()
 
-		resp, err := s.client().Do(req)
+		resp, err := s.do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +269,12 @@ func (s *Service) fetchCuratorRoomAlbumsAll(storefront string, roomID string) ([
 		if strings.TrimSpace(page.Next) == "" {
 			break
 		}
-		pageURL = artistCollectionNextURL(pageURL, page.Next)
+		nextURL := artistCollectionNextURL(pageURL, page.Next)
+		if nextURL == pageURL || pageCount >= catalogMaxPages {
+			// A "next" link that does not advance would loop forever.
+			break
+		}
+		pageURL = nextURL
 	}
 
 	return items, nil

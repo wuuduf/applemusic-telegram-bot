@@ -90,10 +90,14 @@ login: wmcli-build _require-manager-running ## Interactive multi-account login (
 
 .PHONY: login-one
 login-one: wmcli-build _require-manager-running ## Log in one AppleID. Usage: make login-one USER=me@example.com [PASS=secret]
-	@test -n "$(USER)" || { echo "Usage: make login-one USER=<AppleID> [PASS=<password>]"; exit 2; }
-	$(DOCKER) run $(RUN_FLAGS) \
-		$(if $(PASS),-e APPLE_PASSWORD=$(PASS),) \
-		$(WMCLI_IMAGE) login -u $(USER)
+	@# USER is also an environment variable (your OS login), so only accept
+	@# it when it was given on the make command line.
+	@test "$(origin USER)" = "command line" || { echo "Usage: make login-one USER=<AppleID> [PASS=<password>]"; exit 2; }
+	@# The recipe is silent and the password travels in the environment, so
+	@# it is neither echoed by make nor visible in the docker argument list.
+	@APPLE_PASSWORD='$(subst ','\'',$(PASS))' $(DOCKER) run $(RUN_FLAGS) \
+		$(if $(PASS),-e APPLE_PASSWORD,) \
+		$(WMCLI_IMAGE) login -u '$(subst ','\'',$(USER))'
 
 .PHONY: login-batch
 login-batch: wmcli-build _require-manager-running ## Batch login from a TSV file. Usage: make login-batch FILE=accounts.tsv

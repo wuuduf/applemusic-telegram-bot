@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,21 @@ func (b *TelegramBot) catalogService() *sharedcatalog.Service {
 		AppleToken:     b.currentAppleToken(),
 		MediaUserToken: Config.MediaUserToken,
 		Language:       Config.Language,
-		HTTPClient:     b.client,
-		UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-		OpPrefix:       "main.telegram",
+		// Apple requests use the general client, not the Telegram one: the
+		// Telegram proxy settings must not apply to them.
+		HTTPClient: b.appleHTTPClient(),
+		UserAgent:  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		OpPrefix:   "main.telegram",
 	}
+}
+
+// appleHTTPClient is the client for Apple Music and other non-Telegram
+// services. Tests may point it at a stub through appleClient.
+func (b *TelegramBot) appleHTTPClient() *http.Client {
+	if b != nil && b.appleClient != nil {
+		return b.appleClient
+	}
+	return networkHTTPClient
 }
 
 func (b *TelegramBot) fetchArtistProfile(storefront string, artistID string) (string, string, error) {
@@ -296,6 +308,11 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 		return true, nil
 	}
 
+	// The album is downloaded completely before it is zipped and sent, so
+	// keep quota cleanup away from its files until then.
+	releaseTaskFiles := b.cleanupTracker.beginTask()
+	defer releaseTaskFiles()
+
 	var (
 		session      *DownloadSession
 		paths        []string
@@ -335,6 +352,8 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 	if b.cleanupTracker != nil {
 		b.cleanupTracker.RecordPaths(paths)
 	}
+	unpinPaths := b.cleanupTracker.pinPaths(paths)
+	defer unpinPaths()
 
 	if status != nil {
 		status.Update("Zipping", 0, 0)

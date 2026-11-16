@@ -366,11 +366,9 @@ func (b *TelegramBot) doLastFMRequest(values url.Values, out any) error {
 	}
 	req.Header.Set("Accept", "application/json")
 
-	client := networkHTTPClient
-	if b.client != nil {
-		client = b.client
-	}
-	resp, err := client.Do(req)
+	// Last.fm is not Telegram: do not send it through the Telegram client
+	// and its proxy settings.
+	resp, err := b.appleHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}

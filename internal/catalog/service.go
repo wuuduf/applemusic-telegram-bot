@@ -1,8 +1,13 @@
 package catalog
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wuuduf/applemusic-telegram-bot/utils/ampapi"
 	"github.com/wuuduf/applemusic-telegram-bot/utils/lyrics"
@@ -34,6 +39,69 @@ func (s *Service) client() *http.Client {
 	// http.DefaultClient has no timeout; a stalled Apple request would hang
 	// the caller forever.
 	return nethttp.Client()
+}
+
+const (
+	catalogMaxAttempts = 4
+	// catalogMaxPages stops a paginated listing whose "next" link never
+	// ends; no artist or curator room comes anywhere near it.
+	catalogMaxPages = 500
+)
+
+// do sends a body-less request, retrying rate limits and server errors so one
+// 429 in a listing of a hundred pages does not fail the whole task.
+func (s *Service) do(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= catalogMaxAttempts; attempt++ {
+		resp, err := s.client().Do(req.Clone(req.Context()))
+		if err != nil {
+			lastErr = err
+			if req.Context().Err() != nil || attempt == catalogMaxAttempts {
+				return nil, err
+			}
+		} else {
+			retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+			if !retryable || attempt == catalogMaxAttempts {
+				return resp, nil
+			}
+			lastErr = fmt.Errorf("status %s", resp.Status)
+			delay := catalogRetryDelay(attempt, resp.Header.Get("Retry-After"))
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			resp.Body.Close()
+			if !sleepContext(req.Context(), delay) {
+				return nil, req.Context().Err()
+			}
+			continue
+		}
+		if !sleepContext(req.Context(), catalogRetryDelay(attempt, "")) {
+			return nil, req.Context().Err()
+		}
+	}
+	return nil, lastErr
+}
+
+func catalogRetryDelay(attempt int, retryAfter string) time.Duration {
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds > 0 {
+		if seconds > 30 {
+			seconds = 30
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	return time.Duration(1<<(attempt-1)) * 300 * time.Millisecond
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (s *Service) userAgent() string {

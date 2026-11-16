@@ -86,7 +86,7 @@ func (b *TelegramBot) saveAnimatedCoverWithContext(ctx context.Context, motionUR
 	if err != nil {
 		return err
 	}
-	result, err := runExternalCommand(ctx, "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", savePath)
+	result, err := runExternalCommand(ctx, ffmpegBinary(), "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", savePath)
 	if err != nil {
 		outText := strings.TrimSpace(result.Combined)
 		if outText == "" {
@@ -132,7 +132,7 @@ func (b *TelegramBot) exportArtistAssetsWithContext(ctx context.Context, chatID 
 	motionCount := 0
 	failedAlbums := 0
 	ffmpegOK := true
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+	if _, err := exec.LookPath(ffmpegBinary()); err != nil {
 		ffmpegOK = false
 	}
 
@@ -354,7 +354,7 @@ func (b *TelegramBot) handleAnimatedCoverOnlyWithContext(ctx context.Context, ch
 		_ = b.sendMessageWithReply(chatID, "animatedcover only supports song/album/playlist/station.", nil, replyToID)
 		return
 	}
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+	if _, err := exec.LookPath(ffmpegBinary()); err != nil {
 		_ = b.sendMessageWithReply(chatID, "animatedcover requires ffmpeg in PATH.", nil, replyToID)
 		return
 	}
@@ -380,7 +380,7 @@ func (b *TelegramBot) handleAnimatedCoverOnlyWithContext(ctx context.Context, ch
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
-	result, err := runExternalCommand(ctx, "ffmpeg", "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath)
+	result, err := runExternalCommand(ctx, ffmpegBinary(), "-loglevel", "error", "-y", "-i", videoURL, "-c", "copy", tmpPath)
 	if err != nil {
 		if isContextCancellationError(err) {
 			return
@@ -420,7 +420,7 @@ func (b *TelegramBot) enqueueAnimatedCoverTask(chatID int64, replyToID int, targ
 		_ = b.sendMessageWithReply(chatID, "animatedcover only supports song/album/playlist/station.", nil, replyToID)
 		return
 	}
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+	if _, err := exec.LookPath(ffmpegBinary()); err != nil {
 		_ = b.sendMessageWithReply(chatID, "animatedcover requires ffmpeg in PATH.", nil, replyToID)
 		return
 	}
@@ -538,6 +538,9 @@ func (b *TelegramBot) exportAlbumLyricsWithSettingsAndContext(ctx context.Contex
 			}
 		}
 		return
+	}
+	if strings.TrimSpace(exported.Dir) != "" {
+		defer os.RemoveAll(exported.Dir)
 	}
 	lyricPaths := exported.Paths
 	failedCount := exported.FailedCount

@@ -1,5 +1,15 @@
 package structs
 
+import "strings"
+
+// FFmpegPathOrDefault is the configured ffmpeg-path, or "ffmpeg" from PATH.
+func (c ConfigSet) FFmpegPathOrDefault() string {
+	if path := strings.TrimSpace(c.FFmpegPath); path != "" {
+		return path
+	}
+	return "ffmpeg"
+}
+
 type ConfigSet struct {
 	Storefront                           string  `yaml:"storefront"`
 	MediaUserToken                       string  `yaml:"media-user-token"`

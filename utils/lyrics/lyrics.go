@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/beevik/etree"
@@ -35,7 +36,7 @@ func Get(storefront, songId, lrcType, language, lrcFormat, token, mediaUserToken
 }
 
 func GetWithContext(ctx context.Context, storefront, songId, lrcType, language, lrcFormat, token, mediaUserToken string) (string, error) {
-	if len(mediaUserToken) < 50 {
+	if len(mediaUserToken) <= 50 {
 		return "", errors.New("MediaUserToken not set")
 	}
 
@@ -180,30 +181,14 @@ func TtmlToLrc(ttml string) (string, error) {
 	}
 	for _, item := range body.ChildElements() {
 		for _, lyric := range item.ChildElements() {
-			var h, m, s, ms int
 			beginAttr := lyric.SelectAttr("begin")
 			if beginAttr == nil {
 				return "", errors.New("no synchronised lyrics")
 			}
-			beginValue := beginAttr.Value
-			if strings.Contains(beginValue, ":") {
-				_, err = fmt.Sscanf(beginValue, "%d:%d:%d.%d", &h, &m, &s, &ms)
-				if err != nil {
-					_, err = fmt.Sscanf(beginValue, "%d:%d.%d", &m, &s, &ms)
-					if err != nil {
-						_, err = fmt.Sscanf(beginValue, "%d:%d", &m, &s)
-					}
-					h = 0
-				}
-			} else {
-				_, err = fmt.Sscanf(beginValue, "%d.%d", &s, &ms)
-				h, m = 0, 0
-			}
+			m, s, ms, err := parseTTMLClock(beginAttr.Value)
 			if err != nil {
 				return "", err
 			}
-			m += h * 60
-			ms = ms / 10
 			key := lyric.SelectAttrValue("itunes:key", "")
 			translitText := ttmlElementText(findTTMLTextForKey(metadata, "transliterations", "transliteration", key, false))
 			transText := ttmlElementText(findTTMLTextForKey(metadata, "translations", "translation", key, true))
@@ -238,22 +223,10 @@ func conventSyllableTTMLToLRC(ttml string) (string, error) {
 	metadata := ttmlITunesMetadata(ttRoot)
 	var lrcLines []string
 	parseTime := func(timeValue string, newLine int) (string, error) {
-		var h, m, s, ms int
-		if strings.Contains(timeValue, ":") {
-			_, err = fmt.Sscanf(timeValue, "%d:%d:%d.%d", &h, &m, &s, &ms)
-			if err != nil {
-				_, err = fmt.Sscanf(timeValue, "%d:%d.%d", &m, &s, &ms)
-				h = 0
-			}
-		} else {
-			_, err = fmt.Sscanf(timeValue, "%d.%d", &s, &ms)
-			h, m = 0, 0
-		}
+		m, s, ms, err := parseTTMLClock(timeValue)
 		if err != nil {
 			return "", err
 		}
-		m += h * 60
-		ms = ms / 10
 		if newLine == 0 {
 			return fmt.Sprintf("[%02d:%02d.%02d]<%02d:%02d.%02d>", m, s, ms, m, s, ms), nil
 		} else if newLine == -1 {
@@ -351,6 +324,45 @@ func conventSyllableTTMLToLRC(ttml string) (string, error) {
 		}
 	}
 	return strings.Join(lrcLines, "\n"), nil
+}
+
+// parseTTMLClock converts a TTML clock value ("ss", "ss.f", "mm:ss.fff",
+// "hh:mm:ss.ff", ...) into LRC minutes, seconds and centiseconds. Hours are
+// folded into minutes. The fraction may have any number of digits: ".5" is
+// 50 centiseconds, ".73" is 73 and ".345" is 34.
+func parseTTMLClock(value string) (minutes int, seconds int, centis int, err error) {
+	value = strings.TrimSpace(value)
+	whole, fraction, _ := strings.Cut(value, ".")
+	parts := strings.Split(whole, ":")
+	if len(parts) == 0 || len(parts) > 3 {
+		return 0, 0, 0, fmt.Errorf("invalid ttml time %q", value)
+	}
+	fields := make([]int, len(parts))
+	for i, part := range parts {
+		n, convErr := strconv.Atoi(strings.TrimSpace(part))
+		if convErr != nil || n < 0 {
+			return 0, 0, 0, fmt.Errorf("invalid ttml time %q", value)
+		}
+		fields[i] = n
+	}
+	seconds = fields[len(fields)-1]
+	if len(fields) >= 2 {
+		minutes = fields[len(fields)-2]
+	}
+	if len(fields) == 3 {
+		minutes += fields[0] * 60
+	}
+	for i := 0; i < 2; i++ {
+		centis *= 10
+		if i < len(fraction) {
+			digit := fraction[i]
+			if digit < '0' || digit > '9' {
+				return 0, 0, 0, fmt.Errorf("invalid ttml time %q", value)
+			}
+			centis += int(digit - '0')
+		}
+	}
+	return minutes, seconds, centis, nil
 }
 
 func requireTTMLElement(element *etree.Element, op string, path string, reason string) (*etree.Element, error) {

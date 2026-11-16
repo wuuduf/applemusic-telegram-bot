@@ -18,6 +18,9 @@ var (
 )
 
 type AlbumLyricsExportResult struct {
+	// Dir is the temporary directory holding Paths; the caller removes it
+	// once the files have been sent.
+	Dir         string
 	AlbumName   string
 	Paths       []string
 	FailedCount int
@@ -101,6 +104,7 @@ func (s *Service) ExportAlbumLyrics(tempRoot string, albumID string, storefront 
 	}
 	sort.Strings(paths)
 	return &AlbumLyricsExportResult{
+		Dir:         albumDir,
 		AlbumName:   strings.TrimSpace(album.Attributes.Name),
 		Paths:       paths,
 		FailedCount: failed,

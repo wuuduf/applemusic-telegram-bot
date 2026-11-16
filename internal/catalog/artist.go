@@ -96,7 +96,7 @@ func (s *Service) fetchArtistCollectionAll(storefront string, artistID string, e
 	pageLimit := artistCollectionPageLimit(endpoint)
 	apiOffset := 0
 	items := make([]ArtistRelationshipItem, 0)
-	for {
+	for pageCount := 1; ; pageCount++ {
 		req, err := http.NewRequest("GET", pageURL, nil)
 		if err != nil {
 			return nil, err
@@ -116,7 +116,7 @@ func (s *Service) fetchArtistCollectionAll(storefront string, artistID string, e
 		}
 		req.URL.RawQuery = query.Encode()
 
-		resp, err := s.client().Do(req)
+		resp, err := s.do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +147,12 @@ func (s *Service) fetchArtistCollectionAll(storefront string, artistID string, e
 		if page.Next == "" {
 			break
 		}
-		pageURL = artistCollectionNextURL(pageURL, page.Next)
+		nextURL := artistCollectionNextURL(pageURL, page.Next)
+		if nextURL == pageURL || pageCount >= catalogMaxPages {
+			// A "next" link that does not advance would loop forever.
+			break
+		}
+		pageURL = nextURL
 		apiOffset += pageLimit
 	}
 	return items, nil

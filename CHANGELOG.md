@@ -16,6 +16,14 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- LRC timestamps are correct for TTML times with fewer than three fractional digits (`1:02.5` used to become `[01:02.00]`).
+- A failed AAC decrypt no longer leaves a partial file that the next request would send as a finished download; a failed media download is reported instead of being decrypted as an empty file.
+- Apple Music catalog and Last.fm requests use the general HTTP client instead of the Telegram one, so `telegram-proxy-url` / `telegram-no-proxy` no longer apply to them.
+- The Widevine license request has a 45s timeout. Canceling a music-video download stops segment retries at once, and segments downloaded ahead of the writer are bounded (32) instead of accumulating in memory.
+- Catalog listings (artist songs/albums, curator rooms) retry 429/5xx responses, stop on a `next` link that does not advance, and are capped at 500 pages.
+- Album lyrics exports remove their temporary directory; artist/curator ZIP transfers are protected from quota cleanup like other ZIP transfers; `ffmpeg-path` is honored for animated covers and artist assets.
+- wrapper-shim bounds each decrypt round trip to wrapper-manager (2 minutes) so a silent manager cannot pin a handler and its stream.
+- `make login-one` no longer echoes the password (it is passed through the environment) and refuses to run when `USER=` was not given on the command line instead of using the OS login name.
 - CI runs staticcheck (pinned to v0.8.2). Removed the unused code it reported (37 functions/types left behind by earlier refactors) and fixed the remaining findings; retries of Apple API network errors now key on timeouts only, since `net.Error.Temporary` is deprecated.
 - Upgrade to Go 1.26.11 (go.mod toolchain, CI, both Dockerfiles) for GO-2026-6859 in `net/http`, which govulncheck reports against 1.26.10.
 - A graceful stop or restart no longer forgets queued tasks: requests that had not started, and the one cut short by the shutdown, stay in the saved state and are re-queued on the next start (previously this only worked after a hard kill).

@@ -56,7 +56,7 @@ func (s *Service) FetchArtistProfile(storefront string, artistID string) (string
 		query.Set("l", s.Language)
 	}
 	req.URL.RawQuery = query.Encode()
-	resp, err := s.client().Do(req)
+	resp, err := s.do(req)
 	if err != nil {
 		return "", "", err
 	}

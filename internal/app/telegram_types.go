@@ -183,13 +183,16 @@ type TelegramBot struct {
 	appleTokenMu      sync.Mutex
 	appleTokenRetryAt time.Time
 	client            *http.Client
-	pollClient        *http.Client
-	allowedChats      map[int64]bool
-	adminUsers        map[int64]bool
-	forwardChatID     int64
-	searchLimit       int
-	maxFileBytes      int64
-	errorLogFile      string
+	// appleClient overrides the HTTP client used for Apple Music and other
+	// non-Telegram services; nil means the shared general-purpose client.
+	appleClient   *http.Client
+	pollClient    *http.Client
+	allowedChats  map[int64]bool
+	adminUsers    map[int64]bool
+	forwardChatID int64
+	searchLimit   int
+	maxFileBytes  int64
+	errorLogFile  string
 
 	getUpdatesErrorDelay    time.Duration
 	getUpdatesConflictDelay time.Duration

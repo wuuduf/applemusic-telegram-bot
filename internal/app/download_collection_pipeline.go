@@ -315,7 +315,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 				squareReady = true
 			} else {
 				fmt.Println("Animation Artwork Square Downloading...")
-				if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", squarePath); err != nil {
+				if _, err := runExternalCommand(session.downloadContext(), session.Config.FFmpegPathOrDefault(), "-loglevel", "quiet", "-y", "-i", motionvideoURLSquare, "-c", "copy", squarePath); err != nil {
 					fmt.Printf("animated artwork square dl err: %v\n", err)
 				} else {
 					fmt.Println("Animation Artwork Square Downloaded")
@@ -326,7 +326,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 	}
 
 	if cfg.EmbyAnimatedArtwork && squareReady {
-		if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-i", squarePath, "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
+		if _, err := runExternalCommand(session.downloadContext(), session.Config.FFmpegPathOrDefault(), "-i", squarePath, "-vf", "scale=440:-1", "-r", "24", "-f", "gif", filepath.Join(folderPath, "folder.jpg")); err != nil {
 			fmt.Printf("animated artwork square to gif err: %v\n", err)
 		}
 	}
@@ -355,7 +355,7 @@ func prepareAnimatedArtworkStage(session *DownloadSession, folderPath string, sq
 		return
 	}
 	fmt.Println("Animation Artwork Tall Downloading...")
-	if _, err := runExternalCommand(session.downloadContext(), "ffmpeg", "-loglevel", "quiet", "-y", "-i", motionvideoURLTall, "-c", "copy", filepath.Join(folderPath, "tall_animated_artwork.mp4")); err != nil {
+	if _, err := runExternalCommand(session.downloadContext(), session.Config.FFmpegPathOrDefault(), "-loglevel", "quiet", "-y", "-i", motionvideoURLTall, "-c", "copy", filepath.Join(folderPath, "tall_animated_artwork.mp4")); err != nil {
 		fmt.Printf("animated artwork tall dl err: %v\n", err)
 	} else {
 		fmt.Println("Animation Artwork Tall Downloaded")

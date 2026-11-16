@@ -257,9 +257,20 @@ func (c *CDM) GetLicenseKeys(licenseRequest []byte, licenseResponse []byte) (key
 		// i.e if there are 6 padding bytes then it will look at like
 		// <data> 0x6 0x6 0x6 0x6 0x6 0x6
 		count := int(b[len(b)-1])
+		if count > len(b) {
+			// Not valid padding (malformed license); leave it to the
+			// caller to fail on the key instead of panicking here.
+			return b
+		}
 		return b[0 : len(b)-count]
 	}
+	if license.Msg == nil {
+		return nil, errors.New("license response has no message")
+	}
 	for _, key := range license.Msg.Key {
+		if key == nil || key.Type == nil || len(key.Iv) != encryptionKeyCipher.BlockSize() || len(key.Key)%encryptionKeyCipher.BlockSize() != 0 {
+			continue
+		}
 		decrypter := cipher.NewCBCDecrypter(encryptionKeyCipher, key.Iv)
 		decryptedKey := make([]byte, len(key.Key))
 		decrypter.CryptBlocks(decryptedKey, key.Key)

@@ -8,6 +8,12 @@ import (
 	"github.com/wuuduf/applemusic-telegram-bot/utils/cmdrunner"
 )
 
+// ffmpegBinary is the ffmpeg to run: the configured ffmpeg-path, or "ffmpeg"
+// from PATH.
+func ffmpegBinary() string {
+	return Config.FFmpegPathOrDefault()
+}
+
 func runExternalCommand(ctx context.Context, name string, args ...string) (cmdrunner.Result, error) {
 	result, err := cmdrunner.RunWithOptions(ctx, name, args, cmdrunner.RunOptions{})
 	if cmdrunner.IsTimeout(err) {

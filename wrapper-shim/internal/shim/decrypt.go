@@ -46,6 +46,10 @@ type DecryptServer struct {
 	// over many seconds; the bot's runv2 caps the TCP idle to 5 minutes by
 	// default, so we mirror that.
 	idleTimeout time.Duration
+	// rpcTimeout caps one sample's round trip to wrapper-manager. Without
+	// it a silent manager would pin the handler and its gRPC stream long
+	// after the bot gave up and closed its side. Zero disables the cap.
+	rpcTimeout time.Duration
 }
 
 // NewDecryptServer constructs a DecryptServer listening on addr (e.g. ":10020").
@@ -54,6 +58,7 @@ func NewDecryptServer(addr string, client *Client) *DecryptServer {
 		addr:        addr,
 		client:      client,
 		idleTimeout: 5 * time.Minute,
+		rpcTimeout:  2 * time.Minute,
 	}
 }
 
@@ -218,7 +223,15 @@ func (s *DecryptServer) handle(ctx context.Context, conn net.Conn) {
 			dispatchAdam = wireAdamID
 		}
 
+		var rpcWatchdog *time.Timer
+		if s.rpcTimeout > 0 {
+			// Canceling the stream context is what unblocks Send/Recv.
+			rpcWatchdog = time.AfterFunc(s.rpcTimeout, streamCancel)
+		}
 		decrypted, err := decryptOne(stream, dispatchAdam, key, sampleIndex, sample)
+		if rpcWatchdog != nil {
+			rpcWatchdog.Stop()
+		}
 		if err != nil {
 			log.Printf("decrypt %s: rpc sample idx=%d adam=%s: %v",
 				remote, sampleIndex, dispatchAdam, err)

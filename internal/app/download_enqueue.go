@@ -273,7 +273,7 @@ func (b *TelegramBot) sendCachedSongAutoExtras(chatID int64, replyToID int, song
 	}
 
 	if normalized.AutoAnimated && strings.TrimSpace(info.MotionURL) != "" {
-		if _, err := exec.LookPath("ffmpeg"); err != nil {
+		if _, err := exec.LookPath(ffmpegBinary()); err != nil {
 			logWarnf("cached song extra animated skipped (%s): ffmpeg not found", songID)
 			return
 		}

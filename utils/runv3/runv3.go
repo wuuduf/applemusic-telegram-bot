@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -39,6 +40,14 @@ type progressWriter struct {
 
 // ctxKey is the type of the values this package stores in a context.
 type ctxKey string
+
+const (
+	licenseRequestTimeout = 45 * time.Second
+	// segmentWriteWindow is how far ahead of the next segment to be written
+	// downloads may run. It bounds the segments held in memory when an early
+	// one is slow or being retried.
+	segmentWriteWindow = 32
+)
 
 // ErrUnavailable means Apple has no playable asset for the requested track.
 var ErrUnavailable = errors.New("Unavailable")
@@ -271,17 +280,17 @@ func extractKidBase64WithContext(ctx context.Context, b string, mvmode bool) (st
 	}
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
-func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) bytes.Buffer {
+func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) (bytes.Buffer, error) {
 	resp, err := nethttp.GetWithContext(ctx, b)
 	var buffer bytes.Buffer
 	if err != nil {
 		fmt.Printf("下载文件失败: %v\n", err)
-		return buffer
+		return buffer, fmt.Errorf("download media: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("下载文件失败: %s\n", resp.Status)
-		return buffer
+		return buffer, fmt.Errorf("download media: %s", resp.Status)
 	}
 	if progress != nil {
 		pw := &progressWriter{
@@ -291,7 +300,7 @@ func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) by
 		}
 		if _, err := io.Copy(io.MultiWriter(&buffer, pw), resp.Body); err != nil {
 			fmt.Printf("读取下载流失败: %v\n", err)
-			return bytes.Buffer{}
+			return bytes.Buffer{}, fmt.Errorf("download media: %w", err)
 		}
 	} else {
 		bar := progressbar.NewOptions64(
@@ -314,11 +323,12 @@ func extsongWithContext(ctx context.Context, b string, progress ProgressFunc) by
 		)
 		if _, err := io.Copy(io.MultiWriter(&buffer, bar), resp.Body); err != nil {
 			fmt.Printf("读取下载流失败: %v\n", err)
-			return bytes.Buffer{}
+			return bytes.Buffer{}, fmt.Errorf("download media: %w", err)
 		}
 	}
-	return buffer
+	return buffer, nil
 }
+
 func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmode bool, serverUrl string, progress ProgressFunc) (string, error) {
 	return RunWithContext(context.Background(), adamId, trackpath, authtoken, mutoken, mvmode, serverUrl, progress)
 }
@@ -357,6 +367,9 @@ func RunWithContext(ctx context.Context, adamId string, trackpath string, authto
 		"x-apple-music-user-token": mutoken,
 	}
 	client := resty.New()
+	// Without a timeout a silent license server would block the task (and
+	// its download-core slot) until it is canceled by hand.
+	client.SetTimeout(licenseRequestTimeout)
 	client.SetHeaders(headers)
 	key := key.Key{
 		ReqCli:        client,
@@ -382,7 +395,10 @@ func RunWithContext(ctx context.Context, adamId string, trackpath string, authto
 		keyAndUrls := "1:" + keystr + ";" + fileurl
 		return keyAndUrls, nil
 	}
-	body := extsongWithContext(ctx, fileurl, progress)
+	body, err := extsongWithContext(ctx, fileurl, progress)
+	if err != nil {
+		return "", err
+	}
 	fmt.Print("Downloaded\n")
 
 	if progress != nil {
@@ -394,9 +410,14 @@ func RunWithContext(ctx context.Context, adamId string, trackpath string, authto
 		fmt.Printf("创建文件失败: %v\n", err)
 		return "", err
 	}
-	defer ofh.Close()
+	// A half-written file must not survive: the next request would find it
+	// and send it as if it were a finished download.
 	err = DecryptMP4(&body, keybt, ofh)
+	if closeErr := ofh.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
+		_ = os.Remove(trackpath)
 		fmt.Print("Decryption failed\n")
 		return "", err
 	}
@@ -433,6 +454,12 @@ func (s *segmentStats) markFailure(index int, reason string) {
 	s.mu.Lock()
 	s.failed[index] = reason
 	s.mu.Unlock()
+}
+
+func (s *segmentStats) hasFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.failed) > 0
 }
 
 func (s *segmentStats) snapshotFailed() (success int, failed map[int]string) {
@@ -504,7 +531,25 @@ func downloadSegment(
 	const maxRetries = 5
 	var lastErr string
 
+	// retryWait sleeps between attempts and reports false when the task was
+	// canceled, so a canceled download stops instead of sleeping through
+	// every remaining retry of every remaining segment.
+	retryWait := func(attempt int) bool {
+		timer := time.NewTimer(segmentRetryDelay(attempt))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			lastErr = fmt.Sprintf("已取消: %v", err)
+			break
+		}
 		reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 		if err != nil {
@@ -517,8 +562,7 @@ func downloadSegment(
 		if err != nil {
 			cancel()
 			lastErr = fmt.Sprintf("下载失败: %v", err)
-			if attempt < maxRetries {
-				time.Sleep(segmentRetryDelay(attempt))
+			if attempt < maxRetries && retryWait(attempt) {
 				continue
 			}
 			break
@@ -529,8 +573,7 @@ func downloadSegment(
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			cancel()
-			if attempt < maxRetries && isRetryableSegmentStatus(resp.StatusCode) {
-				time.Sleep(segmentRetryDelay(attempt))
+			if attempt < maxRetries && isRetryableSegmentStatus(resp.StatusCode) && retryWait(attempt) {
 				continue
 			}
 			break
@@ -541,8 +584,7 @@ func downloadSegment(
 		cancel()
 		if err != nil {
 			lastErr = fmt.Sprintf("读取数据失败: %v", err)
-			if attempt < maxRetries {
-				time.Sleep(segmentRetryDelay(attempt))
+			if attempt < maxRetries && retryWait(attempt) {
 				continue
 			}
 			break
@@ -563,6 +605,12 @@ func downloadSegment(
 
 // fileWriter 从 Channel 接收分段并按顺序写入文件
 func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.Writer, totalSegments int, errCh chan<- error) {
+	fileWriterWithProgress(wg, segmentsChan, outputFile, totalSegments, errCh, nil)
+}
+
+// fileWriterWithProgress is fileWriter that also reports, after every write,
+// how many segments have been written in order.
+func fileWriterWithProgress(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.Writer, totalSegments int, errCh chan<- error, written func(next int)) {
 	defer wg.Done()
 
 	// 缓冲区，用于存放乱序到达的分段
@@ -587,6 +635,9 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 			_, err := outputFile.Write(segment.Data)
 			recordWriteErr(segment.Index, err)
 			nextIndex++
+			if written != nil {
+				written(nextIndex)
+			}
 
 			// 检查缓冲区中是否有下一个连续的分段
 			for {
@@ -601,6 +652,9 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 				// 从缓冲区删除已写入的分段，释放内存
 				delete(segmentBuffer, nextIndex)
 				nextIndex++
+				if written != nil {
+					written(nextIndex)
+				}
 			}
 		} else {
 			// 如果不是期望的分段，先存入缓冲区
@@ -662,10 +716,32 @@ func ExtMvDataWithContext(ctx context.Context, keyAndUrls string, savePath strin
 
 	// 启动写入 Goroutine
 	writerWg.Add(1)
-	go fileWriter(&writerWg, segmentsChan, barWriter, len(urls), writerErrCh)
+	var nextToWrite atomic.Int64
+	writerAdvanced := make(chan struct{}, 1)
+	go fileWriterWithProgress(&writerWg, segmentsChan, barWriter, len(urls), writerErrCh, func(next int) {
+		nextToWrite.Store(int64(next))
+		select {
+		case writerAdvanced <- struct{}{}:
+		default:
+		}
+	})
 
 	// 启动下载 Goroutines
 	for i, url := range urls {
+		// Do not run further ahead of the writer than the window allows;
+		// otherwise one stuck early segment lets the rest of the video
+		// pile up in memory. Stop launching once a segment has failed for
+		// good or the task is canceled: the download cannot succeed anymore.
+		for int64(i) >= nextToWrite.Load()+segmentWriteWindow && !stats.hasFailure() && ctx.Err() == nil {
+			select {
+			case <-writerAdvanced:
+			case <-ctx.Done():
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		if stats.hasFailure() || ctx.Err() != nil {
+			break
+		}
 		// 在启动 Goroutine 前，向 limiter 发送一个值来“获取”一个槽位
 		// 如果 limiter 已满 (达到10个)，这里会阻塞，直到有其他任务完成并释放槽位
 		//fmt.Printf("请求启动任务 %d...\n", i)
@@ -684,13 +760,16 @@ func ExtMvDataWithContext(ctx context.Context, keyAndUrls string, savePath strin
 
 	// 等待写入 Goroutine 完成所有写入和缓冲处理
 	writerWg.Wait()
-	if writerErr := <-writerErrCh; writerErr != nil {
-		return writerErr
+	writerErr := <-writerErrCh
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-
 	success, failed := stats.snapshotFailed()
 	if success != len(urls) {
 		return errors.New(buildSegmentDownloadErrorSummary(len(urls), success, failed))
+	}
+	if writerErr != nil {
+		return writerErr
 	}
 
 	// 显式关闭文件（defer会再次调用，但重复关闭是安全的）

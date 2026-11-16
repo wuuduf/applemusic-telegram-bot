@@ -94,3 +94,40 @@ func TestTtmlToLrcWordTimingMissingLineKeyDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected non-empty syllable LRC")
 	}
 }
+
+func TestParseTTMLClockHandlesAnyFractionLength(t *testing.T) {
+	cases := []struct {
+		in      string
+		m, s, c int
+	}{
+		{"1:02.5", 1, 2, 50},
+		{"9.73", 0, 9, 73},
+		{"12.345", 0, 12, 34},
+		{"12", 0, 12, 0},
+		{"3:04", 3, 4, 0},
+		{"1:02:03.007", 62, 3, 0},
+		{"00:01.50", 0, 1, 50},
+	}
+	for _, tc := range cases {
+		m, s, c, err := parseTTMLClock(tc.in)
+		if err != nil || m != tc.m || s != tc.s || c != tc.c {
+			t.Errorf("parseTTMLClock(%q) = %d:%d.%d err=%v, want %d:%d.%d", tc.in, m, s, c, err, tc.m, tc.s, tc.c)
+		}
+	}
+	for _, bad := range []string{"", "a:b", "1:2:3:4", "1.x"} {
+		if _, _, _, err := parseTTMLClock(bad); err == nil {
+			t.Errorf("parseTTMLClock(%q) should fail", bad)
+		}
+	}
+}
+
+func TestTtmlToLrcKeepsShortFractions(t *testing.T) {
+	ttml := `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line"><body><div><p begin="1:02.5" end="1:04">a</p><p begin="9.73" end="10">b</p></div></body></tt>`
+	got, err := TtmlToLrc(ttml)
+	if err != nil {
+		t.Fatalf("TtmlToLrc failed: %v", err)
+	}
+	if want := "[01:02.50]a\n[00:09.73]b"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

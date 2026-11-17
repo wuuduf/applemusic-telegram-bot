@@ -28,7 +28,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Login problems (e.g. an expired GHCR_TOKEN) must not hide Dockerfile
+      # The built-in GITHUB_TOKEN (packages: write above) pushes to this
+      # repository's package and never expires, so no personal token has to
+      # be kept alive. Login problems must still not hide Dockerfile
       # problems: the image is always built, and only the push is skipped.
       - name: Log in to GitHub Container Registry
         id: login
@@ -38,8 +40,12 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A push rejected with "denied" after a successful login means the
+      # existing ghcr.io package does not let this repository write to it:
+      # Packages -> applemusic-telegram-bot -> Package settings ->
+      # Manage Actions access -> add this repository with the Write role.
       - name: Build (and push when logged in) Docker image
         uses: docker/build-push-action@v7
         with:
@@ -55,7 +61,7 @@ jobs:
       - name: Fail when the image could not be pushed
         if: github.event_name != 'pull_request' && steps.login.outcome != 'success'
         run: |
-          echo "::error::The image built fine, but logging in to ghcr.io failed, so nothing was pushed. GHCR_TOKEN is probably expired or missing write:packages; create a new token and update the repository secret."
+          echo "::error::The image built fine, but logging in to ghcr.io failed, so nothing was pushed. Check that this job still has the packages: write permission."
           exit 1
 
   wrapper-shim:

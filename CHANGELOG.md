@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Optional bearer-token auth for the metrics/health HTTP endpoints via `telegram-metrics-auth-token`, with a startup warning when a non-loopback bind has no token.
 
 ### Security & stability
+- The Docker workflow logs in to ghcr.io with the built-in `GITHUB_TOKEN` instead of the `GHCR_TOKEN` personal access token, which had expired and blocked every image push. The `GHCR_TOKEN` secret is no longer used.
 - **Fix:** the download quota cleanup no longer treats an inherited `TMPDIR` as a bot-owned directory. On macOS (where `TMPDIR` is always the per-user temp folder) or with an explicitly exported `TMPDIR`, the cleanup could delete other programs' temporary files once the quota was exceeded. Only `AMDL_TMPDIR` and the bot's own `<download folder>/.tmp` are cleaned now; temporary files still go to an inherited `TMPDIR`.
 - Fixed a data race when stopping the resource guard.
 - End-to-end tests (`internal/app/e2e_test.go`) run a real bot runtime against a fake Telegram Bot API and a fake Apple Music API: link → download → upload → file_id cache reuse → `/history`; search selection charged by the rate limiter; only admins change the worker limit; `/cancel` of a running download; graceful restart resuming an interrupted and a queued download. Only the download step itself is stubbed.

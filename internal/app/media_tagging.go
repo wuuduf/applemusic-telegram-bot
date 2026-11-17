@@ -37,7 +37,7 @@ func writeMP4TagsWithMetadata(track *task.Track, lrc string, cfg *structs.Config
 	}
 	tagText := mp4TagTextFieldsFor(track.Resp.Attributes.Name, track.Resp.Attributes.ArtistName, track.Resp.Attributes.AlbumName, track.Resp.Attributes.ComposerName, metadata)
 	genreNames := track.Resp.Attributes.GenreNames
-	if len(metadata.GenreNames) > 0 {
+	if len(metadata.GenreNames) > 0 && (len(genreNames) == 0 || !containsHanCharacters(genreNames[0])) {
 		genreNames = metadata.GenreNames
 	}
 	genre, err := firstGenreName("main.writeMP4Tags", genreNames)
@@ -116,8 +116,8 @@ func writeMP4TagsWithMetadata(track *task.Track, lrc string, cfg *structs.Config
 		t.Publisher = track.AlbumData.RecordLabel
 	}
 	if metadata.AlbumArtist != "" && ((track.PreType != "playlists" && track.PreType != "stations") || cfg.UseSongInfoForPlaylist) {
-		t.AlbumArtist = metadata.AlbumArtist
-		t.AlbumArtistSort = metadata.AlbumArtist
+		t.AlbumArtist = localizedMetadataValue(metadata.AlbumArtist, t.AlbumArtist)
+		t.AlbumArtistSort = t.AlbumArtist
 	}
 
 	if track.Resp.Attributes.ContentRating == "explicit" {

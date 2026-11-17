@@ -172,12 +172,15 @@ func localizedTrackMetadataFromSong(source, candidate *ampapi.SongRespData) loca
 		if localized.Album == "" {
 			localized.Album = setLocalized(candidate.Relationships.Albums.Data[0].Attributes.Name, source.Attributes.AlbumName)
 		}
-		localized.AlbumArtist = setLocalized(candidate.Relationships.Albums.Data[0].Attributes.ArtistName, source.Attributes.ArtistName)
+		// The actual source album artist is available only when assembling tags.
+		localized.AlbumArtist = setLocalized(candidate.Relationships.Albums.Data[0].Attributes.ArtistName, "")
 	}
-	for _, genre := range candidate.Attributes.GenreNames {
-		genre = strings.TrimSpace(genre)
-		if genre != "" && containsHanCharacters(genre) {
-			localized.GenreNames = append(localized.GenreNames, genre)
+	if len(source.Attributes.GenreNames) == 0 || !containsHanCharacters(source.Attributes.GenreNames[0]) {
+		for _, genre := range candidate.Attributes.GenreNames {
+			genre = strings.TrimSpace(genre)
+			if genre != "" && containsHanCharacters(genre) {
+				localized.GenreNames = append(localized.GenreNames, genre)
+			}
 		}
 	}
 	return localized
@@ -222,6 +225,9 @@ func (metadata localizedTrackMetadata) empty() bool {
 }
 
 func localizedMetadataValue(localized, fallback string) string {
+	if containsHanCharacters(fallback) {
+		return fallback
+	}
 	if value := strings.TrimSpace(localized); value != "" {
 		return value
 	}
@@ -305,6 +311,9 @@ func fetchLocalizedSongMetadata(ctx context.Context, storefront string, source *
 	}
 	if resp == nil || resp.Results.Songs == nil {
 		return nil, fmt.Errorf("no song search results in storefront %s", storefront)
+	}
+	if strings.TrimSpace(resp.Results.Songs.Next) != "" {
+		return nil, fmt.Errorf("incomplete song search results in storefront %s", storefront)
 	}
 	match, ok := uniqueISRCMatch(source, resp.Results.Songs.Data)
 	if !ok {

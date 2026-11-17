@@ -12,6 +12,7 @@ func (c ConfigSet) FFmpegPathOrDefault() string {
 
 type ConfigSet struct {
 	Storefront                           string  `yaml:"storefront"`
+	MetadataStorefront                   string  `yaml:"metadata-storefront"`
 	MediaUserToken                       string  `yaml:"media-user-token"`
 	AuthorizationToken                   string  `yaml:"authorization-token"`
 	Language                             string  `yaml:"language"`

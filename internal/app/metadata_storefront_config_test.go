@@ -3,7 +3,6 @@ package app
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/wuuduf/applemusic-telegram-bot/utils/structs"
@@ -33,11 +32,7 @@ func TestLoadConfigMetadataStorefrontOptIn(t *testing.T) {
 			if err := loadConfig(); err != nil {
 				t.Fatal(err)
 			}
-			field := reflect.ValueOf(Config).FieldByName("MetadataStorefront")
-			got := ""
-			if field.IsValid() {
-				got = field.String()
-			}
+			got := Config.MetadataStorefront
 			if got != tc.want {
 				t.Fatalf("metadata-storefront = %q, want %q (cross-storefront config support missing or normalization incorrect)", got, tc.want)
 			}

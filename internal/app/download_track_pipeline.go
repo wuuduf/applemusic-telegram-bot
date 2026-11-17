@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,11 +17,14 @@ import (
 )
 
 type trackDownloadContext struct {
-	session        *DownloadSession
-	cfg            *structs.ConfigSet
-	track          *task.Track
-	token          string
-	mediaUserToken string
+	session                *DownloadSession
+	cfg                    *structs.ConfigSet
+	track                  *task.Track
+	token                  string
+	mediaUserToken         string
+	localizedMetadata      localizedTrackMetadata
+	localizedLookupContext context.Context
+	cancelLocalizedLookups context.CancelFunc
 
 	needDlAacLc       bool
 	actualFormat      string
@@ -76,9 +80,13 @@ func ripTrack(session *DownloadSession, track *task.Track, token string, mediaUs
 	if !ok {
 		return
 	}
+	if ctx.cancelLocalizedLookups != nil {
+		defer ctx.cancelLocalizedLookups()
+	}
 	if handleTrackReuseStage(ctx) {
 		return
 	}
+	resolveTrackLocalizedMetadataStage(ctx)
 	if !downloadTrackMediaStage(ctx) {
 		return
 	}
@@ -220,9 +228,25 @@ func resolveTrackDownloadContextStage(session *DownloadSession, track *task.Trac
 	default:
 		ctx.actualFormat = telegramFormatAlac
 	}
+	if strings.TrimSpace(cfg.MetadataStorefront) != "" {
+		ctx.localizedLookupContext, ctx.cancelLocalizedLookups = newMetadataStorefrontLookupContext(session.downloadContext())
+		ctx.localizedMetadata.SongIDs = make(map[string]string)
+	}
 
 	if cfg.EmbedLrc || cfg.SaveLrcFile {
-		lrcStr, err := lyrics.GetWithContext(session.downloadContext(), track.Storefront, track.ID, cfg.LrcType, cfg.Language, cfg.LrcFormat, token, mediaUserToken)
+		var lrcStr string
+		var err error
+		if strings.TrimSpace(cfg.MetadataStorefront) != "" {
+			lyricsLookup := func(lookupCtx context.Context, storefront, _, _, _, _, authToken, userToken string) (string, error) {
+				return fetchLyricsForMetadataStorefront(
+					lookupCtx, storefront, localizedMetadataSourceFromTrack(&track.Resp),
+					track.Storefront, cfg, authToken, userToken, ctx.localizedMetadata.SongIDs,
+				)
+			}
+			lrcStr, err = resolveLocalizedLyrics(ctx.localizedLookupContext, track.ID, track.Storefront, cfg, token, mediaUserToken, lyricsLookup)
+		} else {
+			lrcStr, err = lyrics.GetWithContext(session.downloadContext(), track.Storefront, track.ID, cfg.LrcType, cfg.Language, cfg.LrcFormat, token, mediaUserToken)
+		}
 		if err != nil {
 			fmt.Println(err)
 		} else {
@@ -238,6 +262,24 @@ func resolveTrackDownloadContextStage(session *DownloadSession, track *task.Trac
 	}
 
 	return ctx, true
+}
+
+func resolveTrackLocalizedMetadataStage(ctx *trackDownloadContext) {
+	if ctx == nil || ctx.session == nil || ctx.track == nil || ctx.cfg == nil || strings.TrimSpace(ctx.cfg.MetadataStorefront) == "" {
+		return
+	}
+	lookupCtx := ctx.localizedLookupContext
+	if lookupCtx == nil {
+		var cancel context.CancelFunc
+		lookupCtx, cancel = newMetadataStorefrontLookupContext(ctx.session.downloadContext())
+		defer cancel()
+	}
+	sourceMetadata := localizedMetadataSourceFromTrack(&ctx.track.Resp)
+	localized, _ := resolveLocalizedSongMetadata(
+		lookupCtx, sourceMetadata, ctx.track.Storefront, ctx.cfg, ctx.token, fetchLocalizedSongMetadata,
+	)
+	mergeLocalizedTrackMetadata(&localized, localizedTrackMetadata{SongIDs: ctx.localizedMetadata.SongIDs})
+	ctx.localizedMetadata = localized
 }
 
 func handleTrackReuseStage(ctx *trackDownloadContext) bool {
@@ -374,7 +416,7 @@ func postProcessTrackStage(ctx *trackDownloadContext) bool {
 		}
 	}
 	ctx.track.SavePath = ctx.trackPath
-	if err := writeMP4Tags(ctx.track, ctx.lrc, ctx.cfg); err != nil {
+	if err := writeMP4TagsWithMetadata(ctx.track, ctx.lrc, ctx.cfg, ctx.localizedMetadata); err != nil {
 		fmt.Println("⚠ Failed to write tags in media:", err)
 	}
 	convertIfNeeded(ctx.session, ctx.track, ctx.lrc)

@@ -12,33 +12,58 @@ import (
 )
 
 func writeMP4Tags(track *task.Track, lrc string, cfg *structs.ConfigSet) error {
+	return writeMP4TagsWithMetadata(track, lrc, cfg, localizedTrackMetadata{})
+}
+
+type mp4TagTextFields struct {
+	Title    string
+	Artist   string
+	Album    string
+	Composer string
+}
+
+func mp4TagTextFieldsFor(title, artist, album, composer string, metadata localizedTrackMetadata) mp4TagTextFields {
+	return mp4TagTextFields{
+		Title:    localizedMetadataValue(metadata.Title, title),
+		Artist:   localizedMetadataValue(metadata.Artist, artist),
+		Album:    localizedMetadataValue(metadata.Album, album),
+		Composer: localizedMetadataValue(metadata.Composer, composer),
+	}
+}
+
+func writeMP4TagsWithMetadata(track *task.Track, lrc string, cfg *structs.ConfigSet, metadata localizedTrackMetadata) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
-	genre, err := firstGenreName("main.writeMP4Tags", track.Resp.Attributes.GenreNames)
+	tagText := mp4TagTextFieldsFor(track.Resp.Attributes.Name, track.Resp.Attributes.ArtistName, track.Resp.Attributes.AlbumName, track.Resp.Attributes.ComposerName, metadata)
+	genreNames := track.Resp.Attributes.GenreNames
+	if len(metadata.GenreNames) > 0 {
+		genreNames = metadata.GenreNames
+	}
+	genre, err := firstGenreName("main.writeMP4Tags", genreNames)
 	if err != nil {
 		return err
 	}
 	t := &mp4tag.MP4Tags{
-		Title:      track.Resp.Attributes.Name,
-		TitleSort:  track.Resp.Attributes.Name,
-		Artist:     track.Resp.Attributes.ArtistName,
-		ArtistSort: track.Resp.Attributes.ArtistName,
+		Title:      tagText.Title,
+		TitleSort:  tagText.Title,
+		Artist:     tagText.Artist,
+		ArtistSort: tagText.Artist,
 		Custom: map[string]string{
-			"PERFORMER":   track.Resp.Attributes.ArtistName,
+			"PERFORMER":   tagText.Artist,
 			"RELEASETIME": track.Resp.Attributes.ReleaseDate,
 			"ISRC":        track.Resp.Attributes.Isrc,
 			"LABEL":       "",
 			"UPC":         "",
 		},
-		Composer:     track.Resp.Attributes.ComposerName,
-		ComposerSort: track.Resp.Attributes.ComposerName,
+		Composer:     tagText.Composer,
+		ComposerSort: tagText.Composer,
 		CustomGenre:  genre,
 		Lyrics:       lrc,
 		TrackNumber:  int16(track.Resp.Attributes.TrackNumber),
 		DiscNumber:   int16(track.Resp.Attributes.DiscNumber),
-		Album:        track.Resp.Attributes.AlbumName,
-		AlbumSort:    track.Resp.Attributes.AlbumName,
+		Album:        tagText.Album,
+		AlbumSort:    tagText.Album,
 	}
 
 	if track.PreType == "albums" {
@@ -89,6 +114,10 @@ func writeMP4Tags(track *task.Track, lrc string, cfg *structs.ConfigSet) error {
 		t.Date = track.AlbumData.ReleaseDate
 		t.Copyright = track.AlbumData.Copyright
 		t.Publisher = track.AlbumData.RecordLabel
+	}
+	if metadata.AlbumArtist != "" && ((track.PreType != "playlists" && track.PreType != "stations") || cfg.UseSongInfoForPlaylist) {
+		t.AlbumArtist = metadata.AlbumArtist
+		t.AlbumArtistSort = metadata.AlbumArtist
 	}
 
 	if track.Resp.Attributes.ContentRating == "explicit" {

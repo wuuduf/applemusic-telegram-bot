@@ -47,8 +47,10 @@ func TelegramCleanupRoots(cfg *structs.ConfigSet) []CleanupRoot {
 	}
 	candidates := []CleanupRoot{
 		cleanupRoot(OwnerTelegram, ModeDownload, cfg.TelegramDownloadFolder),
+		// Only the bot's own temp directory. A plain TMPDIR is shared with
+		// other programs, and the cleanup deletes the oldest files under a
+		// root until the quota is met.
 		cleanupRoot(OwnerTelegram, ModeTemp, os.Getenv("AMDL_TMPDIR")),
-		cleanupRoot(OwnerTelegram, ModeTemp, os.Getenv("TMPDIR")),
 	}
 	if strings.TrimSpace(cfg.TelegramDownloadFolder) == "" {
 		candidates = append(candidates,

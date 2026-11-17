@@ -77,11 +77,7 @@ func runTelegramBot(appleToken string) {
 			logInfof("Telegram daily auto-restart disabled by config.")
 		}
 
-		loopDone := make(chan struct{})
-		go func() {
-			defer close(loopDone)
-			bot.loopWithAutoRestart()
-		}()
+		loopDone := bot.startRuntimeLoop()
 
 		reason := "loop-exit"
 		dailyRestartDeferred := false
@@ -129,35 +125,7 @@ func runTelegramBot(appleToken string) {
 			}
 		}
 
-		bot.requestShutdown()
-		closeHTTPIdleConnections(bot.pollClient)
-		closeHTTPIdleConnections(bot.client)
-		select {
-		case <-loopDone:
-		case <-time.After(5 * time.Second):
-			logErrorf("telegram bot shutdown timed out waiting for polling loop to stop")
-		}
-		if !bot.waitBackgroundTasks(defaultTelegramBackgroundTaskWait) {
-			logErrorf("telegram bot shutdown timed out waiting for background tasks to stop")
-		}
-
-		bot.stopDownloadWorkers()
-		if bot.cleanupTracker != nil {
-			bot.cleanupTracker.stop()
-		}
-		if bot.resourceGuard != nil {
-			bot.resourceGuard.stop()
-		}
-		bot.stopSubscriptionWatcher()
-		bot.stopMetricsHTTPServer()
-		bot.stopMetricsReporter()
-		bot.stopCacheSaver()
-		bot.stopStateSaver()
-		if bot.history != nil {
-			bot.history.Flush()
-		}
-		bot.closeStore()
-		bot.clearAllAutoDeleteMessages()
+		bot.shutdownRuntime(loopDone)
 
 		switch reason {
 		case "signal":
@@ -177,16 +145,61 @@ func runTelegramBot(appleToken string) {
 	}
 }
 
+// startRuntimeLoop runs the polling loop in the background; the returned
+// channel is closed when it stops.
+func (b *TelegramBot) startRuntimeLoop() <-chan struct{} {
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		b.loopWithAutoRestart()
+	}()
+	return loopDone
+}
+
+// shutdownRuntime stops one bot runtime: polling, update handlers,
+// background tasks and workers, then flushes cache, state and history and
+// closes the store. Requests that had not finished stay in the saved state
+// for the next runtime.
+func (b *TelegramBot) shutdownRuntime(loopDone <-chan struct{}) {
+	b.requestShutdown()
+	closeHTTPIdleConnections(b.pollClient)
+	closeHTTPIdleConnections(b.client)
+	select {
+	case <-loopDone:
+	case <-time.After(5 * time.Second):
+		logErrorf("telegram bot shutdown timed out waiting for polling loop to stop")
+	}
+	if !b.waitBackgroundTasks(defaultTelegramBackgroundTaskWait) {
+		logErrorf("telegram bot shutdown timed out waiting for background tasks to stop")
+	}
+
+	b.stopDownloadWorkers()
+	if b.cleanupTracker != nil {
+		b.cleanupTracker.stop()
+	}
+	if b.resourceGuard != nil {
+		b.resourceGuard.stop()
+	}
+	b.stopSubscriptionWatcher()
+	b.stopMetricsHTTPServer()
+	b.stopMetricsReporter()
+	b.stopCacheSaver()
+	b.stopStateSaver()
+	if b.history != nil {
+		b.history.Flush()
+	}
+	b.closeStore()
+	b.clearAllAutoDeleteMessages()
+}
+
 func configureTelegramTempDir(cfg *structs.ConfigSet) {
 	if cfg == nil {
 		return
 	}
 
-	explicitTmp := strings.TrimSpace(os.Getenv("AMDL_TMPDIR"))
-	if explicitTmp == "" {
-		explicitTmp = strings.TrimSpace(os.Getenv("TMPDIR"))
-	}
-	if explicitTmp != "" {
+	// AMDL_TMPDIR names a directory that belongs to the bot, so the download
+	// quota cleanup may delete files in it.
+	if explicitTmp := strings.TrimSpace(os.Getenv("AMDL_TMPDIR")); explicitTmp != "" {
 		clean := filepath.Clean(explicitTmp)
 		if err := os.MkdirAll(clean, 0755); err != nil {
 			logWarnf("Failed to prepare temp dir %s: %v", clean, err)
@@ -196,7 +209,15 @@ func configureTelegramTempDir(cfg *structs.ConfigSet) {
 		if strings.TrimSpace(os.Getenv("TMPDIR")) == "" {
 			_ = os.Setenv("TMPDIR", clean)
 		}
-		logInfof("Telegram temp dir: %s (from environment)", clean)
+		logInfof("Telegram temp dir: %s (from AMDL_TMPDIR)", clean)
+		return
+	}
+	// A TMPDIR inherited from the environment is shared with other programs
+	// (on macOS it is always set, to the per-user temp folder). Temporary
+	// files still go there, but it is deliberately not recorded as
+	// AMDL_TMPDIR, so the quota cleanup never deletes other programs' files.
+	if inherited := strings.TrimSpace(os.Getenv("TMPDIR")); inherited != "" {
+		logInfof("Telegram temp dir: %s (inherited TMPDIR; not managed by download cleanup)", filepath.Clean(inherited))
 		return
 	}
 

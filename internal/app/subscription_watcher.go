@@ -555,7 +555,7 @@ func (b *TelegramBot) enqueueSubscriptionAlbumDownload(chatID int64, subscriptio
 	}
 	req.run = func(bot *TelegramBot, ctx context.Context) error {
 		success := bot.runDownloadWithContextResult(ctx, chatID, func(session *DownloadSession) error {
-			return ripAlbum(session, release.AlbumID, bot.currentAppleToken(), release.Storefront, session.Config.MediaUserToken, "")
+			return botRipAlbum(session, release.AlbumID, bot.currentAppleToken(), release.Storefront, session.Config.MediaUserToken, "")
 		}, false, false, 0, settings, transferModeOneByOne, mediaTypeAlbum, release.AlbumID, release.Storefront)
 		if success {
 			bot.markTemporaryReleaseSent(release.ID)
@@ -905,7 +905,7 @@ func (b *TelegramBot) enqueueSubscriptionAlbumRefresh(chatID int64, subscription
 	}
 	req.run = func(bot *TelegramBot, ctx context.Context) error {
 		success := bot.runDownloadWithContextResult(ctx, chatID, func(session *DownloadSession) error {
-			return ripAlbum(session, release.AlbumID, bot.currentAppleToken(), release.Storefront, session.Config.MediaUserToken, "")
+			return botRipAlbum(session, release.AlbumID, bot.currentAppleToken(), release.Storefront, session.Config.MediaUserToken, "")
 		}, false, true, 0, settings, transferModeOneByOne, mediaTypeAlbum, release.AlbumID, release.Storefront)
 		if success {
 			bot.markTemporaryReleaseRefreshed(release.ID)

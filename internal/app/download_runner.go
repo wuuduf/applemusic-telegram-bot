@@ -265,7 +265,7 @@ func (b *TelegramBot) runCollectionOneByOneSequentialWithContext(ctx context.Con
 			defer releaseCore()
 			session.clearDownloadState()
 			if mediaType == mediaTypeArtistSongs {
-				if err := ripSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
+				if err := botRipSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
 					if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 						downloadFailed = true
 						return

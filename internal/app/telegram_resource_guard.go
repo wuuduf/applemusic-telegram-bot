@@ -119,7 +119,10 @@ func (g *telegramResourceGuard) start() {
 	if g.stopCh != nil {
 		return
 	}
-	g.stopCh = make(chan struct{})
+	// The loop keeps its own copy: stop() clears the field while the loop
+	// may still be selecting on it.
+	stopCh := make(chan struct{})
+	g.stopCh = stopCh
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
@@ -132,7 +135,7 @@ func (g *telegramResourceGuard) start() {
 					runWithRecovery("telegram resource guard tick", nil, func() {
 						g.evaluate()
 					})
-				case <-g.stopCh:
+				case <-stopCh:
 					return
 				}
 			}

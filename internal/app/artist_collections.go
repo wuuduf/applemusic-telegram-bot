@@ -183,7 +183,7 @@ func (b *TelegramBot) stageArtistLPAlbumsCollection(session *DownloadSession, ar
 		if albumID == "" {
 			continue
 		}
-		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := botRipAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -213,7 +213,7 @@ func (b *TelegramBot) stageCuratorAlbumsCollection(session *DownloadSession, cur
 		if albumID == "" {
 			continue
 		}
-		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := botRipAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -239,7 +239,7 @@ func (b *TelegramBot) downloadArtistSongsCollection(session *DownloadSession, ar
 		if err := session.downloadContext().Err(); err != nil {
 			return err
 		}
-		if err := ripSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
+		if err := botRipSong(session, trackID, b.currentAppleToken(), storefront, session.Config.MediaUserToken); err != nil {
 			if ctxErr := session.downloadContext().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -330,7 +330,7 @@ func (b *TelegramBot) runArtistLPAlbumZipTransferWithContext(ctx context.Context
 		if status != nil {
 			status.Update("Downloading", 0, 0)
 		}
-		if err := ripAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
+		if err := botRipAlbum(session, albumID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, ""); err != nil {
 			return err
 		}
 

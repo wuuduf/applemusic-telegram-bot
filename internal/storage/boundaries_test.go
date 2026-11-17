@@ -24,7 +24,8 @@ func TestApplyTelegramStorageOverrides(t *testing.T) {
 
 func TestTelegramCleanupRootsPreferTelegramOwnedRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("TMPDIR", filepath.Join(tmpDir, "owned-tmp"))
+	t.Setenv("AMDL_TMPDIR", filepath.Join(tmpDir, "owned-tmp"))
+	t.Setenv("TMPDIR", filepath.Join(tmpDir, "shared-tmp"))
 	cfg := &structs.ConfigSet{
 		TelegramDownloadFolder: filepath.Join(tmpDir, "telegram"),
 		AlacSaveFolder:         filepath.Join(tmpDir, "cli-alac"),
@@ -39,6 +40,22 @@ func TestTelegramCleanupRootsPreferTelegramOwnedRoot(t *testing.T) {
 	}
 	if roots[0].Owner != OwnerTelegram || roots[0].Mode != ModeDownload || roots[0].Path != filepath.Clean(cfg.TelegramDownloadFolder) {
 		t.Fatalf("unexpected download root: %#v", roots[0])
+	}
+}
+
+func TestTelegramCleanupRootsIgnoreInheritedTMPDIR(t *testing.T) {
+	tmpDir := t.TempDir()
+	shared := filepath.Join(tmpDir, "shared-tmp")
+	t.Setenv("AMDL_TMPDIR", "")
+	t.Setenv("TMPDIR", shared)
+	roots := TelegramCleanupRoots(&structs.ConfigSet{TelegramDownloadFolder: filepath.Join(tmpDir, "telegram")})
+	for _, root := range roots {
+		if root.Path == filepath.Clean(shared) {
+			t.Fatalf("an inherited TMPDIR is shared with other programs and must not be a cleanup root: %#v", roots)
+		}
+	}
+	if len(roots) != 1 {
+		t.Fatalf("expected only the download root, got %#v", roots)
 	}
 }
 

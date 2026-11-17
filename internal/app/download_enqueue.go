@@ -201,7 +201,7 @@ func (b *TelegramBot) enqueueSongDownload(chatID int64, songID string, storefron
 		return
 	}
 	if queued := b.enqueueDownload(chatID, replyToID, true, forceRefresh, settings, transferMode, mediaTypeSong, songID, storefront, inflightKey, func(session *DownloadSession) error {
-		return ripSong(session, songID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
+		return botRipSong(session, songID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 	}); !queued {
 		b.releaseInflightDownload(inflightKey)
 	}
@@ -398,7 +398,7 @@ func (b *TelegramBot) enqueueCollectionDownload(chatID int64, mediaType string, 
 	switch mediaType {
 	case mediaTypeAlbum:
 		enqueueWithRollback(func(session *DownloadSession) error {
-			return ripAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
+			return botRipAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
 		})
 	case mediaTypePlaylist:
 		enqueueWithRollback(func(session *DownloadSession) error {

@@ -728,11 +728,11 @@ func (b *TelegramBot) buildDownloadWorkerFn(mediaType string, mediaID string, st
 	switch mediaType {
 	case mediaTypeSong:
 		return func(session *DownloadSession) error {
-			return ripSong(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
+			return botRipSong(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken)
 		}, nil
 	case mediaTypeAlbum:
 		return func(session *DownloadSession) error {
-			return ripAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
+			return botRipAlbum(session, mediaID, b.currentAppleToken(), storefront, session.Config.MediaUserToken, "")
 		}, nil
 	case mediaTypePlaylist:
 		return func(session *DownloadSession) error {

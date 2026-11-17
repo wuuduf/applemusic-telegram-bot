@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Optional `metadata-storefront` for Chinese-first song tags and lyrics independent of the audio storefront. Disabled by default; set `cn` (or another preferred two-letter storefront) to enable. Fallbacks are `cn` → `tw` → `hk` → `us`, with original-storefront lyrics retained when localized lyrics are unavailable. Matching uses catalog ID without conflicting ISRC, or exact ISRC plus duration (within 2s) for cross-ID results; ambiguous or incomplete/paginated search results are rejected. Lookups share an 8s per-track budget and leave filenames/audio routing untouched. Existing files/Telegram cache are not retagged automatically.
 - `/quota` shows a user's download allowance: actions available now, time to the next refill, and 24h usage against the daily quota.
 - Rate-limit refunds: when every task a message tried to queue is turned away because the queue is full or resources are under pressure, the charge for that message is returned. Messages that only open a selection panel or contain invalid input stay charged, so panels cannot be used to bypass the limiter.
 - Command registry (`internal/app/command_registry.go`): one table now drives alias resolution, per-user rate limiting, the zh/en `/help` text and the optional Telegram command menu. Tests fail if a dispatched command is missing from the registry (or vice versa), or if a visible command is undocumented in the READMEs. `/help` output is unchanged.

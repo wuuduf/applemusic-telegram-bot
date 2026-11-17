@@ -78,6 +78,7 @@ func loadConfig() error {
 	if len(Config.Storefront) != 2 {
 		Config.Storefront = "us"
 	}
+	Config.MetadataStorefront = normalizeMetadataStorefront(Config.MetadataStorefront)
 	return nil
 }
 

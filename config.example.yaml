@@ -50,6 +50,10 @@ mv-max: 2160
 # if your account is from Japan, you must use jp.
 # if the storefront is different from your account, you will see a "failed to get lyrics" error in most of the songs. By default the storefront is set to US if not set.
 storefront: "us"
+# Optional Chinese-first song tags/lyrics; audio still uses the download storefront.
+# Empty (default) disables localization. Enabled order: configured market, cn, tw, hk, us;
+# lyrics finally fall back to the download storefront. Missing/ambiguous matches keep originals.
+metadata-storefront: ""
 # Conversion settings
 convert-after-download: false     # Enable post-download conversion (requires ffmpeg)
 convert-format: "flac"            # flac | mp3 | opus | wav | copy (no re-encode)
